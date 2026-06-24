@@ -17,6 +17,9 @@
       "Bash(open flow.html)",
       "WebSearch",
       "Bash(pkill -f \"scripts.baseline_run\")",
+      "Bash(git checkout *)",
+      "Bash(awk '{print $2, $10, $11, $12, $13}')",
+      "Bash(awk '{print $2,$11,$12,$13}')",
       "Bash(git add *)",
       "Bash(git commit *)"
     ]
