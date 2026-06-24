@@ -221,11 +221,11 @@ def main():
 
     rule = load_rule()
 
-    from parsers.revenue_parser import RevenueParser
-    from parsers.rnd_parser import RndParser
-    from parsers.employee_parser import EmployeeParser
-    from parsers.cost_parser import CostParser
-    from parsers.top_supplier_parser import TopSupplierParser
+    from parsers.revenue.default import RevenueParser
+    from parsers.rnd.default import RndParser
+    from parsers.employee.default import EmployeeParser
+    from parsers.cost.default import CostParser
+    from parsers.top_supplier.default import TopSupplierParser
 
     results = {}
     results["revenue"] = debug_parser("营收结构", pdf_path, "revenue_section", RevenueParser, rule)

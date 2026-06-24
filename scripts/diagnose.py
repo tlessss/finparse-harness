@@ -23,7 +23,7 @@ def load_rule():
 
 def diagnose_revenue(pdf_path):
     """营收结构诊断"""
-    from parsers.revenue_parser import RevenueParser
+    from parsers.revenue.default import RevenueParser
     rule = load_rule()
 
     print(f"\n{'='*60}")
@@ -180,14 +180,14 @@ if __name__ == "__main__":
     # 逐个诊断
     diagnose_revenue(pdf)
 
-    from parsers.rnd_parser import RndParser
+    from parsers.rnd.default import RndParser
     diagnose_generic("RndParser", pdf, RndParser, "rnd_section", rule)
 
-    from parsers.employee_parser import EmployeeParser
+    from parsers.employee.default import EmployeeParser
     diagnose_generic("EmployeeParser", pdf, EmployeeParser, "employee_section", rule)
 
-    from parsers.cost_parser import CostParser
+    from parsers.cost.default import CostParser
     diagnose_generic("CostParser", pdf, CostParser, "cost_section", rule)
 
-    from parsers.top_supplier_parser import TopSupplierParser
+    from parsers.top_supplier.default import TopSupplierParser
     diagnose_generic("TopSupplierParser", pdf, TopSupplierParser, "supplier_section", rule)
