@@ -110,3 +110,36 @@ def best_version_per_report(versions: Dict[str, ParseFn], golden_entries: List[D
                             dims=_DIMS) -> Dict:
     """registry 选优：每份 golden 报告 → 当前最优版本名。"""
     return compare_versions(versions, golden_entries, dims)["per_report_best"]
+
+
+def accept_candidate(base_fn: ParseFn, candidate_fn: ParseFn, golden_entries: List[Dict],
+                     dims=_DIMS, min_gain: float = 1e-6) -> Dict:
+    """
+    版本闸（沙箱/LLM 闭环的直接接口）：LLM 改出 candidate，要不要收？
+
+    收的条件（正确率优先：宁可不收，绝不把别的改坏）：
+      · 整体均分严格提升（> min_gain）
+      · 且不在任何一份 golden 上比 base 退步
+
+    Returns:
+      {"accepted": bool, "base_score": float, "candidate_score": float,
+       "regressions": [(code,year), ...], "improved": bool}
+    """
+    base = eval_version(base_fn, golden_entries, dims)
+    cand = eval_version(candidate_fn, golden_entries, dims)
+    base_by = {(r["stock_code"], r["year"]): r["score"] for r in base["per_report"]}
+
+    regressions = []
+    for r in cand["per_report"]:
+        key = (r["stock_code"], r["year"])
+        if key in base_by and r["score"] < base_by[key] - 1e-9:
+            regressions.append(key)
+
+    improved = cand["summary"]["mean_score"] > base["summary"]["mean_score"] + min_gain
+    return {
+        "accepted": improved and not regressions,
+        "base_score": base["summary"]["mean_score"],
+        "candidate_score": cand["summary"]["mean_score"],
+        "improved": improved,
+        "regressions": regressions,
+    }
