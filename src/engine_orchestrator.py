@@ -82,6 +82,9 @@ class FinParseAI:
             output["revenue_breakdown"] = rev_result["revenue_breakdown"]
             db_fields["revenue_breakdown"] = rev_result["revenue_breakdown"]
             statuses.append("rev_ok")
+            # 透传溯源（M1）：供人工 review / 裁判对照原文
+            if rev_result.get("溯源"):
+                output.setdefault("溯源", {})["revenue_breakdown"] = rev_result["溯源"]
         else:
             statuses.append("rev_missing")
 

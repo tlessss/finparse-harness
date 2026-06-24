@@ -62,8 +62,8 @@ class RevenueParser(BaseParser):
 
         unit_ratio = self._detect_unit_from_pdf(pdf_path, candidate_pages)
         best = self._select_best_table(revenue_tables)
-        result = self._classify(best, unit_ratio=unit_ratio)
-        return {"revenue_breakdown": result, "status": "ok"}
+        result, provenance = self._classify(best, unit_ratio=unit_ratio)
+        return {"revenue_breakdown": result, "溯源": provenance, "status": "ok"}
 
     def _select_best_table(self, tables: list) -> list:
         """
@@ -131,14 +131,31 @@ class RevenueParser(BaseParser):
         return sorted(candidates)[:15]
 
     def _extract_tables(self, pdf_path: str, pages: List[int]) -> list:
+        """抽候选表。改用 find_tables 以保留每格坐标，旁挂到 _bbox_map 供溯源（M1）。
+        返回值仍是 2D 字符串网格列表（不改下游筛选/认列逻辑）。"""
+        self._bbox_map = {}   # id(grid) -> (page, cell_bbox)，靠对象身份关联，下游只重排不拷贝
         all_tables = []
         with pdfplumber.open(pdf_path) as pdf:
             for pn in pages:
                 if pn - 1 >= len(pdf.pages):
                     continue
-                for t in pdf.pages[pn - 1].extract_tables():
+                for tbl in pdf.pages[pn - 1].find_tables():
+                    try:
+                        t = tbl.extract()
+                    except Exception:
+                        continue
+                    if not t:
+                        continue
                     text = " ".join(c.replace("\n", " ") for row in t for c in row if c)
                     if ("分产品" in text or "分行业" in text or "分地区" in text) and len(t) >= 5:
+                        cell_bbox = []
+                        for ri, row in enumerate(tbl.rows):
+                            cells = getattr(row, "cells", None) or []
+                            brow = [tuple(c) if c else None for c in cells]
+                            # 对齐到与 t[ri] 同长
+                            need = len(t[ri]) if ri < len(t) else len(brow)
+                            cell_bbox.append([brow[ci] if ci < len(brow) else None for ci in range(need)])
+                        self._bbox_map[id(t)] = (pn, cell_bbox)
                         all_tables.append(t)
         return all_tables
 
@@ -283,7 +300,16 @@ class RevenueParser(BaseParser):
 
         name_col, amount_col, ratio_col = self._resolve_columns(table)
 
+        # 溯源：取该表的 (页码, 坐标网格)（_extract_tables 旁挂）
+        page, cell_bbox = getattr(self, "_bbox_map", {}).get(id(table), (None, None))
+
+        def _bbox_at(r, col):
+            if cell_bbox is None or col is None or r >= len(cell_bbox):
+                return None
+            return cell_bbox[r][col] if col < len(cell_bbox[r]) else None
+
         result = {"segments": [], "industries": [], "regions": [], "by_channel": []}
+        provenance = {}
         current = "segments"
         seen = {}
 
@@ -343,10 +369,25 @@ class RevenueParser(BaseParser):
                 "ratio_pct": ratio,
             }
             if name not in seen.get(current, set()):
+                idx = len(result[current])
                 result[current].append(item)
                 seen[current].add(name)
+                # 溯源：记录该项各数值来自哪一格
+                if page is not None:
+                    base = f"{current}[{idx}]"
+                    nb = _bbox_at(row_idx, name_col)
+                    if nb:
+                        provenance[f"{base}.name"] = {"page": page, "bbox": nb}
+                    if item["revenue_yuan"] is not None:
+                        ab = _bbox_at(row_idx, amount_col)
+                        if ab:
+                            provenance[f"{base}.revenue_yuan"] = {"page": page, "bbox": ab}
+                    if ratio is not None:
+                        rb = _bbox_at(row_idx, ratio_col)
+                        if rb:
+                            provenance[f"{base}.ratio_pct"] = {"page": page, "bbox": rb}
 
-        return result
+        return result, provenance
 
     @staticmethod
     def _looks_like_money(s: str) -> bool:

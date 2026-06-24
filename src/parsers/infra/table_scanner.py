@@ -68,12 +68,25 @@ def detect_page_context(pdf_path: str) -> Dict[int, str]:
 
 # ── 表格提取 ──
 
+def _align_bbox(grid: list, cell_bbox: list) -> list:
+    """把 cell_bbox 补齐成与 grid 完全同形状（缺的填 None），保证解析器按列索引取坐标不越界。"""
+    out = []
+    for ri, row in enumerate(grid):
+        brow = cell_bbox[ri] if ri < len(cell_bbox) else []
+        out.append([brow[ci] if ci < len(brow) else None for ci in range(len(row))])
+    return out
+
+
 def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     """
-    扫描 PDF 正文页，提取所有表格，每张表附带页码和章节上下文。
+    扫描 PDF 正文页，提取所有表格，每张表附带页码、章节上下文与单元格坐标(溯源用)。
+
+    用 find_tables() 替代 extract_tables()，额外保留每格 bbox（M1 溯源基建）。
 
     Returns:
-        [{"page": int, "table": list, "text": str, "section": str}, ...]
+        [{"page": int, "table": [[str]], "text": str, "section": str,
+          "cell_bbox": [[(x0,y0,x1,y1)|None]],   # 与 table 同形状
+          "table_bbox": (x0,y0,x1,y1)|None}, ...]
     """
     # 先扫章节上下文
     page_context = detect_page_context(pdf_path)
@@ -83,17 +96,31 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
         end_page = min(15 + max_pages, len(pdf.pages))
         for page_num in range(15, end_page):
             page = pdf.pages[page_num]
-            tables = page.extract_tables()
             pn = page_num + 1
             section = page_context.get(pn, SECTION_OTHER)
 
-            for t in tables:
-                text = " ".join(c.replace("\n", " ") for row in t for c in row if c)
+            for tbl in page.find_tables():
+                try:
+                    grid = tbl.extract()
+                except Exception:
+                    continue
+                if not grid:
+                    continue
+                # 与 grid 同形状的坐标网格
+                cell_bbox = []
+                for row in tbl.rows:
+                    cells = getattr(row, "cells", None) or []
+                    cell_bbox.append([tuple(c) if c else None for c in cells])
+                cell_bbox = _align_bbox(grid, cell_bbox)
+
+                text = " ".join(c.replace("\n", " ") for row in grid for c in row if c)
                 results.append({
                     "page": pn,
-                    "table": t,
+                    "table": grid,
                     "text": text,
                     "section": section,
+                    "cell_bbox": cell_bbox,
+                    "table_bbox": tuple(tbl.bbox) if getattr(tbl, "bbox", None) else None,
                 })
 
     return results
