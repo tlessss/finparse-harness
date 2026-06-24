@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 
 from src.eval.table_cache import get_tables
 from src.eval.sandbox_exec import version_parse_fn
-from src.eval.parser_catalog import CERTIFIED
+from src.eval.parser_catalog import load_certified
 
 _DIMS = ("industries", "segments", "regions", "by_channel")
 
@@ -43,7 +43,7 @@ def route_revenue(code: str, year: int,
        "parser": path|None, "parser_key": key|None,
        "result": revenue_breakdown|None, "signal": {...}, "tried": [(key, clean), ...]}
     """
-    catalog = catalog if catalog is not None else CERTIFIED
+    catalog = catalog if catalog is not None else load_certified()
     if get_tables(code, year) is None:
         return {"status": "needs_repair", "parser": None, "parser_key": None,
                 "result": None, "signal": None, "tried": [], "reason": "无缓存表"}
