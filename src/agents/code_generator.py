@@ -73,14 +73,29 @@ def _feedback(rep: Dict, out_rb: Dict) -> str:
     else:
         probs = "; ".join(f"[{m.get('dim')}]{m.get('name')}:{m.get('issue')}"
                           for m in (rep.get("mismatches") or [])[:8])
-        lines.append(f"问题：{probs}。针对这些修正。")
+        lines.append(f"问题：{probs}。")
+        # 整维度漏失的诊断（通用结构知识）
+        miss = [d for d in ("industries", "segments", "regions")
+                if not (out_rb or {}).get(d)
+                and any(m.get("dim") == d for m in (rep.get("mismatches") or []))]
+        if "industries" in miss:
+            lines.append(
+                "你**完全漏了 industries 维度**。常见原因：该维度的标记被吸收/缺失——"
+                "唯一的行业行(如『工程机械行业』)往往直接出现在『分产品』标记**之前**，没有单独『分行业』标记行。"
+                "处理：把任何『分X』标记出现**之前**的数据行(有金额+占比的行)默认归到 industries；"
+                "遇到『分产品』/『分地区』标记再切到对应桶。")
+        elif miss:
+            lines.append(f"你完全漏了维度 {miss}，检查这些『分X』标记是否被你的切桶逻辑识别。")
+        lines.append("针对这些修正。")
     lines.append("重新只输出完整代码。")
     return "\n".join(lines)
 
 
 def generate_parser(code: str, year: int, golden_entry: Dict,
                     base_fn: Callable, out_path: str,
-                    max_rounds: int = 4, log=print) -> Dict:
+                    max_rounds: int = 8, log=print) -> Dict:
+    """终点=完全正确(exact)。没到 exact 就继续想办法；到上限仍不 exact → 转人工。
+    绝不在半成品(部分正确)上停下。base_fn 仅作安全护栏(不退步)，不是 stop 条件。"""
     tables = get_tables(code, year)
     if tables is None:
         return {"accepted": False, "error": "无缓存表"}
@@ -102,7 +117,7 @@ def generate_parser(code: str, year: int, golden_entry: Dict,
             v1_fn = version_parse_fn(out_path)
             out_rb = v1_fn(code, year)
             ev = eval_version(v1_fn, [golden_entry])
-            gate = accept_candidate(base_fn, v1_fn, [golden_entry])
+            safety = accept_candidate(base_fn, v1_fn, [golden_entry])  # 仅护栏：是否比v0退步
         except Exception as e:
             import traceback as _tb
             frames = _tb.format_exc().strip().splitlines()
@@ -117,11 +132,16 @@ def generate_parser(code: str, year: int, golden_entry: Dict,
 
         rep = ev["per_report"][0]
         score = rep["score"]
-        log(f"  [第{r}轮] 分={score} exact={rep.get('exact')} 闸={'✅收' if gate['accepted'] else '✗拒'}")
-        if gate["accepted"]:
+        log(f"  [第{r}轮] 分={score} exact={rep.get('exact')} (不退步={not safety['regressions']})")
+
+        # 终点 = 完全正确。只有 exact 才算成功收下。
+        if rep.get("exact"):
             return {"accepted": True, "rounds": r, "score": score, "out_path": out_path}
 
+        # 没全对 → 继续想办法（把还差哪喂回去）
         messages += [{"role": "assistant", "content": raw},
                      {"role": "user", "content": _feedback(rep, out_rb)}]
 
-    return {"accepted": False, "rounds": max_rounds, "out_path": out_path}
+    # 想尽 max_rounds 仍没到 exact → 不留半成品，转人工
+    return {"accepted": False, "escalate": "human", "rounds": max_rounds,
+            "best_score": score, "out_path": out_path}

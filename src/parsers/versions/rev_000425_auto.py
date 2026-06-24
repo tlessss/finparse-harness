@@ -3,130 +3,161 @@ from src.parsers.infra.table_scanner import parse_money, parse_ratio, is_total_r
 def parse(tables, context=None) -> dict:
     result = {"industries": [], "segments": [], "regions": []}
     dimension_map = {"分行业": "industries", "分产品": "segments", "分地区": "regions"}
-
-    # 第一步：筛选候选表（至少有一行包含“分行业/分产品/分地区”）
-    candidate_tables = []
-    for tbl in tables:
-        table = tbl["table"]
-        has_dimension = False
+    
+    # 第一步：筛选候选表
+    candidates = []
+    for t in tables:
+        table = t["table"]
+        if not table or len(table) < 2:
+            continue
+        num_cols = max(len(row) for row in table)
+        if num_cols < 3:
+            continue
+        has_dim = False
         for row in table:
             for cell in row:
                 if cell and any(kw in cell for kw in ["分行业", "分产品", "分地区"]):
-                    has_dimension = True
+                    has_dim = True
                     break
-            if has_dimension:
+            if has_dim:
                 break
-        if not has_dimension:
+        if not has_dim:
             continue
-        candidate_tables.append(tbl)
-
-    if not candidate_tables:
+        candidates.append(t)
+    
+    if not candidates:
         return result
-
-    # 第二步：对每个候选表，按维度标记切分数据行，在每个桶内找占比列
+    
+    # 第二步：识别占比构成表
     best_table = None
-    best_deviation = float('inf')
-    best_money_col = None
-    best_ratio_col = None
-
-    for tbl in candidate_tables:
-        table = tbl["table"]
-        # 先找出所有维度标记行和对应的数据行范围
-        dimension_ranges = []  # [(dimension_name, start_row, end_row), ...]
-        current_dim = None
-        current_start = None
-        for i, row in enumerate(table[1:], 1):
-            first_cell = row[0].strip() if row[0] else ""
-            if first_cell in dimension_map:
-                if current_dim is not None:
-                    dimension_ranges.append((current_dim, current_start, i))
-                current_dim = dimension_map[first_cell]
-                current_start = i
-            elif current_dim is not None and i == len(table) - 1:
-                dimension_ranges.append((current_dim, current_start, i + 1))
-        if current_dim is not None and (not dimension_ranges or dimension_ranges[-1][1] != current_start):
-            dimension_ranges.append((current_dim, current_start, len(table)))
-
-        if not dimension_ranges:
+    best_score = -1
+    for t in candidates:
+        table = t["table"]
+        # 找所有维度标记行
+        dim_rows = []
+        for i, row in enumerate(table):
+            for cell in row:
+                if cell and any(kw in cell for kw in ["分行业", "分产品", "分地区"]):
+                    dim_rows.append(i)
+                    break
+        
+        if not dim_rows:
             continue
-
-        # 尝试每个可能的占比列（从第1列开始，跳过第0列名称列）
-        for col_idx in range(1, len(table[0])):
-            total_deviation = 0
-            valid_buckets = 0
-            for dim_name, start, end in dimension_ranges:
-                bucket_ratios = []
-                for r in range(start, end):
-                    row = table[r]
-                    cell = row[col_idx] if col_idx < len(row) else None
-                    if cell is None:
-                        continue
-                    r_val = parse_ratio(cell)
-                    if r_val is not None:
-                        bucket_ratios.append(r_val)
-                if not bucket_ratios:
+        
+        # 对每个维度桶，检查占比列
+        for dim_start in dim_rows:
+            dim_end = len(table)
+            for dr in dim_rows:
+                if dr > dim_start:
+                    dim_end = dr
+                    break
+            bucket_rows = []
+            for i in range(dim_start + 1, dim_end):
+                row = table[i]
+                if not row or not any(cell and cell.strip() for cell in row):
                     continue
-                bucket_sum = sum(bucket_ratios)
-                deviation = abs(bucket_sum - 100)
-                total_deviation += deviation
-                valid_buckets += 1
-
-            if valid_buckets == 0:
+                first_cell = row[0].strip() if row[0] else ""
+                if is_total_row(first_cell) or not first_cell:
+                    continue
+                bucket_rows.append(i)
+            if len(bucket_rows) < 2:
                 continue
-
-            avg_deviation = total_deviation / valid_buckets
-            if avg_deviation < best_deviation:
-                # 检查左侧是否有金额列
-                money_col = None
-                for left_col in range(col_idx - 1, -1, -1):
-                    money_vals = []
-                    for row in table[1:]:
-                        cell = row[left_col] if left_col < len(row) else None
-                        if cell is None:
-                            continue
-                        m = parse_money(cell)
-                        if m is not None:
-                            money_vals.append(m)
-                    if len(money_vals) >= 3:
-                        money_col = left_col
-                        break
-                if money_col is not None:
-                    best_deviation = avg_deviation
-                    best_table = tbl
-                    best_money_col = money_col
-                    best_ratio_col = col_idx
-
+            
+            for col_idx in range(1, len(table[0])):
+                ratios = []
+                for r in bucket_rows:
+                    cell = table[r][col_idx] if col_idx < len(table[r]) else None
+                    if cell:
+                        val = parse_ratio(cell)
+                        if val is not None:
+                            ratios.append(val)
+                if len(ratios) >= 2:
+                    total = sum(ratios)
+                    if 95 <= total <= 105:
+                        money_col = col_idx - 1
+                        if money_col >= 1:
+                            money_vals = []
+                            for r in bucket_rows:
+                                cell = table[r][money_col] if money_col < len(table[r]) else None
+                                if cell:
+                                    val = parse_money(cell)
+                                    if val is not None:
+                                        money_vals.append(val)
+                            if len(money_vals) >= 2:
+                                score = len(bucket_rows) + (100 - abs(total - 100)) / 10
+                                if score > best_score:
+                                    best_score = score
+                                    best_table = {
+                                        "table": table,
+                                        "dim_rows": dim_rows,
+                                        "money_col": money_col,
+                                        "ratio_col": col_idx
+                                    }
+    
     if best_table is None:
         return result
-
-    # 第三步：解析最佳表
+    
     table = best_table["table"]
-    current_dimension = None
-    for row in table[1:]:
+    money_col = best_table["money_col"]
+    ratio_col = best_table["ratio_col"]
+    dim_rows = best_table["dim_rows"]
+    
+    # 第三步：提取数据
+    # 处理第一个维度标记之前的行（归为industries）
+    first_dim_row = dim_rows[0] if dim_rows else len(table)
+    for i in range(1, first_dim_row):
+        row = table[i]
+        if not row or not any(cell and cell.strip() for cell in row):
+            continue
         first_cell = row[0].strip() if row[0] else ""
-        if first_cell in dimension_map:
-            current_dimension = dimension_map[first_cell]
+        if is_total_row(first_cell) or not first_cell:
             continue
-        if current_dimension is None:
+        money_str = row[money_col] if money_col < len(row) else None
+        revenue = parse_money(money_str) if money_str else None
+        if revenue is None:
             continue
-        if not first_cell or is_total_row(first_cell):
-            continue
-
-        money_str = row[best_money_col] if best_money_col < len(row) else None
-        ratio_str = row[best_ratio_col] if best_ratio_col < len(row) else None
-        if money_str is None and ratio_str is None:
-            continue
-
-        money = parse_money(money_str) if money_str else None
+        ratio_str = row[ratio_col] if ratio_col < len(row) else None
         ratio = parse_ratio(ratio_str) if ratio_str else None
-        if money is None and ratio is None:
+        if ratio is None:
             continue
-
-        entry = {"name": first_cell}
-        if money is not None:
-            entry["revenue_yuan"] = money
-        if ratio is not None:
-            entry["ratio_pct"] = ratio
-        result[current_dimension].append(entry)
-
+        item = {"name": first_cell, "revenue_yuan": revenue, "ratio_pct": ratio}
+        result["industries"].append(item)
+    
+    # 处理每个维度桶
+    for idx, dim_row in enumerate(dim_rows):
+        # 确定维度类型
+        dim_cell = table[dim_row][0].strip() if table[dim_row] and table[dim_row][0] else ""
+        dim_key = None
+        for kw, key in dimension_map.items():
+            if kw in dim_cell:
+                dim_key = key
+                break
+        if dim_key is None:
+            continue
+        
+        # 确定桶结束行
+        if idx + 1 < len(dim_rows):
+            end_row = dim_rows[idx + 1]
+        else:
+            end_row = len(table)
+        
+        # 提取桶内数据行
+        for i in range(dim_row + 1, end_row):
+            row = table[i]
+            if not row or not any(cell and cell.strip() for cell in row):
+                continue
+            first_cell = row[0].strip() if row[0] else ""
+            if is_total_row(first_cell) or not first_cell:
+                continue
+            money_str = row[money_col] if money_col < len(row) else None
+            revenue = parse_money(money_str) if money_str else None
+            if revenue is None:
+                continue
+            ratio_str = row[ratio_col] if ratio_col < len(row) else None
+            ratio = parse_ratio(ratio_str) if ratio_str else None
+            if ratio is None:
+                continue
+            item = {"name": first_cell, "revenue_yuan": revenue, "ratio_pct": ratio}
+            result[dim_key].append(item)
+    
     return result

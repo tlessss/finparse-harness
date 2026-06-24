@@ -37,15 +37,16 @@ def main():
     def base_fn(c, y):
         return v0_rb
 
-    print(f"\n🤖 让 LLM({Config.LLM_MODEL}) 自动写解析器…")
-    r = generate_parser(CODE, YEAR, golden_entry, base_fn, OUT, max_rounds=4)
+    print(f"\n🤖 让 LLM({Config.LLM_MODEL}) 自动写解析器（终点=完全正确）…")
+    r = generate_parser(CODE, YEAR, golden_entry, base_fn, OUT, max_rounds=8)
 
     print(f"\n{'='*56}")
     if r["accepted"]:
-        print(f"🎉 自动生成成功！第 {r['rounds']} 轮过闸，分={r['score']}")
+        print(f"🎉 完全正确！第 {r['rounds']} 轮达到 exact（分=1.0），认证收下")
         print(f"   LLM 写的解析器: {r['out_path']}")
     else:
-        print(f"❌ {r['rounds']} 轮内未过闸（弱模型多迭代正常；可加轮数或换强模型）")
+        print(f"🙋 {r['rounds']} 轮仍未完全正确（最好 {r.get('best_score')}）→ 转人工")
+        print(f"   不留半成品；该版式交人工处理/补 fork 母本/换强模型")
 
 
 if __name__ == "__main__":
