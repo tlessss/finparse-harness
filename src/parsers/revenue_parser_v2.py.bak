@@ -1,0 +1,342 @@
+"""
+RevenueParser v2 — 基于表格内容特征识别（结合关键词缩小范围）
+
+流程：
+  1. 用 PyMuPDF 全文搜索宽泛关键词找到候选页码
+  2. 对候选页用 pdfplumber 提取表格
+  3. 通过内容特征识别营收结构表
+  4. 自动检测列分布提取数据
+"""
+
+from typing import List, Dict, Optional
+import re
+import pdfplumber
+import fitz
+
+# 宽泛的营收相关关键词（覆盖大多数版式）
+_REVENUE_KEYWORDS = [
+    "营业收入", "营收", "主营业务", "收入构成",
+    "分产品", "分行业", "分地区", "收入与成本",
+    "收入和成本", "经营情况",
+]
+
+
+class RevenueParserV2:
+    def __init__(self, rule: Dict):
+        self.rule = rule
+
+    def parse(self, pdf_path: str) -> Dict:
+        candidate_pages = self._find_candidate_pages(pdf_path)
+        if not candidate_pages:
+            return {"revenue_breakdown": None, "status": "no_table_found"}
+
+        tables = self._extract_tables(pdf_path, candidate_pages)
+        revenue_tables = self._filter_revenue_tables(tables)
+        if not revenue_tables:
+            return {"revenue_breakdown": None, "status": "no_table_found"}
+
+        best = revenue_tables[0]
+        result = self._classify(best)
+        return {"revenue_breakdown": result, "status": "ok"}
+
+    def _find_candidate_pages(self, pdf_path: str) -> List[int]:
+        """用 PyMuPDF 快速搜索关键词，找到候选页码"""
+        try:
+            doc = fitz.open(pdf_path)
+        except Exception:
+            return []
+
+        candidates = set()
+        for pn in range(len(doc)):
+            text = doc[pn].get_text("text")
+            for kw in _REVENUE_KEYWORDS:
+                if kw in text:
+                    candidates.add(pn + 1)
+                    # 也包含前后页（跨页表）
+                    if pn > 0:
+                        candidates.add(pn)
+                    if pn < len(doc) - 1:
+                        candidates.add(pn + 2)
+                    break
+
+        doc.close()
+
+        # 只取正文页（跳过前 15 页封面目录）
+        candidates = {p for p in candidates if p >= 16}
+        return sorted(candidates)[:15]  # 最多 15 页
+
+    def _extract_tables(self, pdf_path: str, pages: List[int]) -> list:
+        """提取候选页的表格"""
+        all_tables = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for pn in pages:
+                if pn - 1 >= len(pdf.pages):
+                    continue
+                tables = pdf.pages[pn - 1].extract_tables()
+                for t in tables:
+                    if len(t) >= 5:
+                        all_tables.append(t)
+        return all_tables
+
+    def _filter_revenue_tables(self, tables: list) -> list:
+        """通过内容特征筛选营收结构表"""
+        scored = []
+        for t in tables:
+            score = 0
+            text = " ".join(c for row in t for c in row if c)
+            name_col, amount_col, ratio_col = self._detect_columns(t)
+
+            # 特征1: 有占比列（核心特征）
+            if ratio_col is not None:
+                score += 35
+
+            # 特征2: 有金额列
+            if amount_col is not None:
+                score += 25
+
+            # 特征3: 内容包含"营业收入"或"营收"
+            if "营业收入" in text:
+                score += 20
+            elif "营收" in text:
+                score += 10
+
+            # 特征4: 有同比/增减
+            if "同比" in text or "增减" in text:
+                score += 10
+
+            # 特征5: 有节标题（分产品/行业/地区）
+            if "分产品" in text or "分行业" in text or "分地区" in text:
+                score += 15
+
+            # 特征6: 行数适中（8-30 行，太大可能是明细表）
+            row_count = len(t)
+            if 8 <= row_count <= 30:
+                score += 10
+            elif row_count > 30:
+                score -= 10  # 惩罚过大的表
+
+            # 特征7: 有多个中文名称
+            names = 0
+            for row in t:
+                for c in row:
+                    if c and any('\u4e00' <= ch <= '\u9fff' for ch in c) and len(c) >= 2:
+                        names += 1
+                        break
+            if names >= 5:
+                score += 10
+
+            # 特征8: 排除明显不是营收表的特征
+            if "员工" in text and "人数" in text:
+                score -= 30
+            if "供应商" in text:
+                score -= 20
+            if "研发" in text and "费用" in text:
+                score -= 20
+
+            if score >= 40:
+                scored.append((score, t))
+
+        scored.sort(key=lambda x: -x[0])
+        return [t for _, t in scored]
+
+    def _detect_columns(self, table: list) -> tuple:
+        """自动检测名称列、金额列、占比列"""
+        num_cols = max(len(row) for row in table) if table else 0
+        if num_cols == 0:
+            return 0, None, None
+
+        col_stats = {i: {"text": 0, "number": 0, "ratio": 0} for i in range(num_cols)}
+
+        for row in table:
+            for col_idx in range(len(row)):
+                val = row[col_idx]
+                if not val:
+                    continue
+                # 处理合并单元格中的换行
+                clean_val = val.replace("\n", " ").strip()
+                if not clean_val:
+                    continue
+                if "%" in clean_val:
+                    col_stats[col_idx]["ratio"] += 1
+                elif self._looks_like_money(clean_val):
+                    col_stats[col_idx]["number"] += 1
+                elif self._is_text(clean_val):
+                    col_stats[col_idx]["text"] += 1
+
+        # 占比列：找 ratio 出现最多且数值在 0-100 之间的列
+        ratio_col = None
+        for col_idx in range(num_cols):
+            values = []
+            for row in table:
+                if col_idx < len(row):
+                    val = row[col_idx]
+                    if val and "%" in val:
+                        cleaned = val.replace("%", "").replace(",", "").strip()
+                        try:
+                            v = float(cleaned)
+                            values.append(v)
+                        except ValueError:
+                            pass
+            # 占比应该在 0-100 之间
+            valid_ratios = [v for v in values if 0 <= v <= 100]
+            if len(valid_ratios) >= 3:
+                if ratio_col is None or len(valid_ratios) > len([
+                    v for row in table if col_idx < len(row) and row[col_idx] and "%" in row[col_idx]
+                ]):
+                    ratio_col = col_idx
+
+        # 金额列
+        amount_col = None
+        for col_idx in range(num_cols):
+            money_count = 0
+            for row in table:
+                if col_idx < len(row):
+                    val = row[col_idx]
+                    if val and self._looks_like_money(val):
+                        money_count += 1
+            if money_count >= 3:
+                if amount_col is None or money_count > sum(1 for row in table if col_idx < len(row) and row[col_idx] and self._looks_like_money(row[col_idx])):
+                    amount_col = col_idx
+
+        # 金额列不能和占比列同一列
+        if amount_col == ratio_col:
+            amount_col = None
+            for col_idx in range(num_cols):
+                if col_idx != ratio_col:
+                    money_count = sum(1 for row in table if col_idx < len(row) and row[col_idx] and self._looks_like_money(row[col_idx]))
+                    if money_count >= 2:
+                        amount_col = col_idx
+                        break
+
+        # 名称列
+        name_col = None
+        for col_idx in range(num_cols):
+            if col_idx == amount_col or col_idx == ratio_col:
+                continue
+            text_count = sum(1 for row in table if col_idx < len(row) and row[col_idx] and self._is_text(row[col_idx]))
+            if text_count >= 3:
+                name_col = col_idx
+                break
+        if name_col is None:
+            # 回退到非金额/非占比的最高 text 列
+            candidates = sorted(col_stats.keys(), key=lambda i: col_stats[i]["text"], reverse=True)
+            for c in candidates:
+                if c != amount_col and c != ratio_col:
+                    name_col = c
+                    break
+            if name_col is None and candidates:
+                name_col = candidates[0]
+
+        return name_col, amount_col, ratio_col
+
+    def _classify(self, table: list) -> Dict:
+        """按内容分类"""
+        section_labels = {"分行业": "industries", "分产品": "segments", "分地区": "regions"}
+        sections = []
+        for row in table:
+            found = None
+            for c in row:
+                if c and c.strip() in section_labels:
+                    found = section_labels[c.strip()]
+                    break
+            sections.append(found)
+
+        name_col, amount_col, ratio_col = self._detect_columns(table)
+
+        result = {"segments": [], "industries": [], "regions": []}
+        current = "segments"
+        seen = {}
+
+        for row_idx, row in enumerate(table):
+            sec = sections[row_idx]
+            if sec:
+                current = sec
+                if current not in seen:
+                    seen[current] = set()
+                continue
+            if current not in seen:
+                seen[current] = set()
+
+            cells = [c.strip() if c else "" for c in row]
+
+            name = cells[name_col] if name_col is not None and name_col < len(cells) else ""
+            if not name or len(name) <= 1:
+                # 尝试从合并单元格提取
+                for c in cells:
+                    if c and self._is_text(c) and len(c) >= 2:
+                        name = c[:30]
+                        break
+                if not name or len(name) <= 1:
+                    continue
+
+            # 过滤表头行
+            if name in ("项 目", "项目", "营业收入合计", "营业收入总额", "合计"):
+                continue
+            if any(kw in name for kw in ["年", "金额", "占比", "增减"]):
+                if any(c.isdigit() for c in name):
+                    continue
+
+            amount_raw = cells[amount_col] if amount_col is not None and amount_col < len(cells) else ""
+            ratio_raw = cells[ratio_col] if ratio_col is not None and ratio_col < len(cells) else ""
+
+            amount = self._parse_number(amount_raw) if amount_raw else None
+            ratio = self._parse_ratio(ratio_raw) if ratio_raw else None
+
+            # 如果金额列拿到的是百分比（合并单元格场景）
+            if "%" in amount_raw and ratio is None:
+                ratio = self._parse_ratio(amount_raw)
+                amount = None
+
+            # 跳过无数据的行
+            if ratio is None and amount is None:
+                continue
+
+            item = {
+                "name": name.split("  ")[0].strip()[:30],  # 清理多余空格
+                "revenue_wan": round(amount / 10000, 2) if amount else None,
+                "ratio_pct": ratio,
+            }
+            if name not in seen.get(current, set()):
+                result[current].append(item)
+                seen[current].add(name)
+
+        return result
+
+    @staticmethod
+    def _looks_like_money(s: str) -> bool:
+        s = s.replace(",", "").replace("，", "").strip()
+        if not s:
+            return False
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _is_text(s: str) -> bool:
+        if not s:
+            return False
+        return any('\u4e00' <= c <= '\u9fff' for c in s)
+
+    @staticmethod
+    def _parse_number(s: str):
+        if not s:
+            return None
+        s = s.replace(",", "").replace("，", "").strip()
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_ratio(s: str):
+        if not s:
+            return None
+        # 括住负数
+        s = s.replace("(", "-").replace("（", "-").replace(")", "").replace("）", "")
+        s = s.replace("%", "").replace(",", "").strip()
+        try:
+            return float(s)
+        except ValueError:
+            return None

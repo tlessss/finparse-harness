@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(claude-api)",
+      "Read(//Users/admin/formal/**)",
+      "Bash(command -v python3)",
+      "Bash(command -v node)",
+      "Bash(python3 *)",
+      "Bash(python3 -c ' *)",
+      "Bash(node -e ' *)",
+      "Bash(npx tsc *)",
+      "Bash(npx next *)",
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(cd *)",
+      "Bash(wc -l *)",
+      "Bash(open flow.html)"
+    ]
+  }
+}

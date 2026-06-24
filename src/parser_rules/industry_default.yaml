@@ -1,0 +1,93 @@
+
+# ===== AI可自动修改的财报解析规则配置 =====
+# 版本: v1.0
+# 适配版式: 通用上市公司财报版式
+# 创建方式: 人工初始搭建 / AI自动生成
+
+# 1. 指标别名映射（AI最常改：解决字段改名、口径变更）
+keyword_mapping:
+  研发费用:
+    - 研发支出
+    - 技术开发费用
+    - 研究与开发费用
+  营业收入:
+    - 营业总收入
+    - 主营业务收入
+  员工总人数:
+    - 期末员工人数
+    - 在职员工总数
+    - 母公司在职员工
+    - 员工情况
+
+# 2. 各字段的表格提取配置（新增——每个字段独立配置页码范围、关键词、列映射）
+
+# 2a. 营收结构（主营业务分产品/分行业/分地区）
+revenue_section:
+  pages: "24-26"
+  table_keywords:
+    - 营业收入构成
+    - 主营业务分
+  columns:
+    name: 0
+    amount_2025: 3
+    ratio_2025: 6
+    amount_2024: 9
+    ratio_2024: 12
+    yoy_change: 17
+
+# 2b. 研发费用明细（附注表）
+rnd_section:
+  pages: "205"
+  table_keywords:
+    - 研发费用
+  columns:
+    name: 0
+    amount_this: 1
+    amount_last: 2
+
+# 2c. 员工构成
+employee_section:
+  pages: "51"
+  table_keywords:
+    - 专业构成
+    - 教育程度
+    - 在职员工
+
+# 2d. 成本构成
+cost_section:
+  pages: "25"
+  table_keywords:
+    - 营业成本构成
+    - 占营业成本比重
+
+# 2e. 主要客户和供应商（26页）
+supplier_section:
+  pages: "26-28"
+  table_keywords:
+    - 主要销售客户
+    - 主要供应商
+    - 前五名
+
+# 3. 表格截取规则（旧，兼容 base_engine）
+table_area:
+  pages: "1-20"
+  flavor: "lattice"
+  skip_empty_row: true
+
+# 4. 正则清洗规则（AI改：适配新的数值格式、备注干扰）
+regex_rules:
+  - field: 研发费用
+    pattern: "[0-9,.]+"
+  - field: 营业收入
+    pattern: "[0-9,.]+"
+
+# 5. 单位转换规则（AI改：万元/亿元自动适配）
+unit_convert:
+  unit: "万元"
+  multiple: 1
+
+# 6. 版式特征（AI判断是否新版式的依据）
+layout_feature:
+  has_research_table: true
+  has_staff_structure: true
+  similarity_threshold: 0.8

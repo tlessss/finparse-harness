@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Flow Visualizer — 模板</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1419;color:#e5e7eb;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{padding:24px 32px 4px}header h1{margin:0;font-size:22px}header p{margin:6px 0 0;color:#9ca3af;font-size:13px}
+  #legend{display:flex;gap:16px;flex-wrap:wrap;padding:10px 32px;font-size:12px;color:#9ca3af}
+  #legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .wrap{display:flex;gap:20px;padding:8px 32px 40px;align-items:flex-start}
+  .diagram{flex:1 1 auto;min-width:0;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:8px}
+  svg{width:100%;height:auto;display:block}
+  .panel{flex:0 0 320px;position:sticky;top:16px;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:18px;min-height:240px}
+  .panel h3{margin:0 0 4px;font-size:16px}
+  .panel .file{font-family:ui-monospace,monospace;font-size:12px;color:#58a6ff;word-break:break-all}
+  .panel .what{margin:12px 0;font-size:13.5px;line-height:1.6;color:#d1d5db}
+  .panel ul{margin:8px 0;padding-left:18px;font-size:12.5px;line-height:1.7;color:#b9c0c8}
+  .panel .data{margin-top:12px;padding:8px 10px;background:#0d1117;border-radius:8px;font-size:12px;color:#8b949e}
+  .panel .hint{color:#6b7280;font-size:12px;line-height:1.7}
+  .node{cursor:pointer}
+  .node rect{transition:filter .15s,stroke-width .15s}
+  .node:hover rect{filter:brightness(1.25)}
+  .node.active rect{stroke-width:3}
+  .node text{pointer-events:none}
+  .lbl{fill:#e5e7eb;font-size:13.5px;font-weight:600}
+  .sub{fill:#cbd5e1;font-size:11px}
+  .edgelbl{fill:#94a3b8;font-size:10.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <p id="subtitle"></p>
+</header>
+<div id="legend"></div>
+<div class="wrap">
+  <div class="diagram"><svg id="svg"></svg></div>
+  <div class="panel" id="panel"><div class="hint">👈 点任意节点看细节。</div></div>
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+ *  ① 只改这一段：把你的系统描述成数据
+ *  （下面是一份占位示例，照着替换即可。坐标不用你管，自动布局。）
+ * ════════════════════════════════════════════════════════════════ */
+const META = {
+  title: "示例系统 · 全流程可视化",
+  subtitle: "把这段 META / GROUPS / NODES / EDGES / DETAILS 换成你的系统即可。",
+};
+
+// 分组 = 颜色 + 图例文字。节点按 group 自动着色（描边用该色，填充自动半透明同色）。
+const GROUPS = {
+  input:   { color: "#1f6feb", label: "输入" },
+  process: { color: "#7c3aed", label: "处理" },
+  output:  { color: "#15803d", label: "输出" },
+};
+
+// 节点：row 决定第几层（从 0 往下），同 row 的节点自动横向居中排列。
+//   id 唯一；label 主标题；sub 副标题；group 决定颜色；w 可选宽度（默认 300）。
+//   detail 是点击后右侧面板显示的内容。
+const NODES = [
+  { id: "in",   row: 0, group: "input",   label: "① 数据输入", sub: "来源说明",
+    detail: { file: "path/to/source", what: "这里写它做什么。", points: ["关键点 1", "关键点 2"], data: "真实数字" } },
+  { id: "proc", row: 1, group: "process", label: "② 处理核心", sub: "怎么处理",
+    detail: { file: "path/to/core", what: "处理逻辑说明。", points: ["先做 A", "再做 B"] } },
+  { id: "a",    row: 2, group: "process", label: "子步骤 A", sub: "", w: 200, detail: { file: "", what: "A 的说明。" } },
+  { id: "b",    row: 2, group: "process", label: "子步骤 B", sub: "", w: 200, detail: { file: "", what: "B 的说明。" } },
+  { id: "out",  row: 3, group: "output",  label: "③ 输出", sub: "落到哪",
+    detail: { file: "path/to/sink", what: "结果去向。", data: "形成闭环" } },
+];
+
+// 边：from→to（按 id）。label 可选；dashed:true 画虚线（常用于回环/闭环）。
+//   to 在 from 下方 = 向下箭头；同层 = 横向；to 在上方 = 右侧回环（自动）。
+const EDGES = [
+  { from: "in",   to: "proc", label: "送入" },
+  { from: "proc", to: "a" },
+  { from: "proc", to: "b" },
+  { from: "a",    to: "out" },
+  { from: "b",    to: "out" },
+  { from: "out",  to: "in",  label: "闭环", dashed: true },
+];
+/* ════════════════════════════════════════════════════════════════
+ *  ② 下面是渲染引擎，一般不用改。
+ * ════════════════════════════════════════════════════════════════ */
+const W = 860, TOP = 28, ROW_GAP = 116, NODE_H = 58, NODE_W = 300, H_GAP = 26;
+
+const byId = {};
+NODES.forEach(n => byId[n.id] = n);
+
+// 自动布局：按 row 分层，每层横向居中
+const rows = {};
+NODES.forEach(n => { (rows[n.row] = rows[n.row] || []).push(n); });
+Object.keys(rows).forEach(rk => {
+  const arr = rows[rk];
+  const widths = arr.map(n => n.w || NODE_W);
+  const total = widths.reduce((a, b) => a + b, 0) + H_GAP * (arr.length - 1);
+  let x = (W - total) / 2;
+  arr.forEach((n, i) => {
+    n._w = widths[i]; n._h = n.h || NODE_H;
+    n._x = x; n._y = TOP + Number(n.row) * ROW_GAP;
+    n._cx = x + n._w / 2; n._cy = n._y + n._h / 2;
+    n._top = n._y; n._bot = n._y + n._h;
+    x += widths[i] + H_GAP;
+  });
+});
+const svgH = Math.max(...NODES.map(n => n._bot)) + 36;
+
+// 边的路径：向下 / 同层 / 回环 三种走法
+let _backIdx = 0;   // 多条回环边时右移错开，避免重叠
+function edgePath(a, b) {
+  if (b.row > a.row) {                       // 向下
+    const my = (a._bot + b._top) / 2;
+    return `M${a._cx},${a._bot} C${a._cx},${my} ${b._cx},${my} ${b._cx},${b._top}`;
+  } else if (b.row === a.row) {              // 同层横向
+    return `M${a._x + a._w},${a._cy} L${b._x},${b._cy}`;
+  } else {                                   // 回环（右侧绕上去）
+    const rx = W - 6 - (_backIdx++) * 16;
+    return `M${a._x + a._w},${a._cy} C${rx},${a._cy} ${rx},${b._cy} ${b._x + b._w},${b._cy}`;
+  }
+}
+function edgeLabelPos(a, b) {
+  if (b.row > a.row) return { x: (a._cx + b._cx) / 2 + 8, y: (a._bot + b._top) / 2 };
+  if (b.row === a.row) return { x: (a._x + a._w + b._x) / 2, y: a._cy - 4 };
+  return { x: W - 4, y: (a._cy + b._cy) / 2 };
+}
+
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+let svg = `<svg viewBox="0 0 ${W} ${svgH}" xmlns="http://www.w3.org/2000/svg"><defs>
+  <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#6b7280"/></marker>
+</defs>`;
+
+// 边（先画，压在节点下）
+EDGES.forEach(e => {
+  const a = byId[e.from], b = byId[e.to];
+  if (!a || !b) return;
+  svg += `<path d="${edgePath(a, b)}" fill="none" stroke="#6b7280" stroke-width="1.6"`
+       + (e.dashed ? ` stroke-dasharray="5 4"` : ``) + ` marker-end="url(#arr)"/>`;
+  if (e.label) { const p = edgeLabelPos(a, b); svg += `<text class="edgelbl" x="${p.x}" y="${p.y}">${esc(e.label)}</text>`; }
+});
+
+// 节点
+NODES.forEach(n => {
+  const g = GROUPS[n.group] || { color: "#6b7280" };
+  const dash = n.planned ? ` stroke-dasharray="6 4"` : ``;   // planned:true → 虚线框（标记"待开发"）
+  const op = n.planned ? 0.07 : 0.14;
+  svg += `<g class="node" data-key="${n.id}">`
+       + `<rect x="${n._x}" y="${n._y}" width="${n._w}" height="${n._h}" rx="10" fill="${g.color}" fill-opacity="${op}" stroke="${g.color}"${dash}/>`
+       + `<text class="lbl" x="${n._cx}" y="${n._top + (n.sub ? 24 : n._h / 2 + 5)}" text-anchor="middle">${esc(n.label)}</text>`;
+  if (n.sub) svg += `<text class="sub" x="${n._cx}" y="${n._top + 42}" text-anchor="middle">${esc(n.sub)}</text>`;
+  svg += `</g>`;
+});
+svg += `</svg>`;
+
+// 注入 + 标题 + 图例
+document.getElementById("title").textContent = META.title || "";
+document.getElementById("subtitle").textContent = META.subtitle || "";
+document.getElementById("svg").outerHTML = svg;
+document.getElementById("legend").innerHTML = Object.values(GROUPS)
+  .map(g => `<span><i class="dot" style="background:${g.color}"></i>${esc(g.label)}</span>`).join("");
+
+// 点击 → 详情
+const panel = document.getElementById("panel");
+let activeEl = null;
+document.querySelectorAll(".node").forEach(el => {
+  el.addEventListener("click", () => {
+    if (activeEl) activeEl.classList.remove("active");
+    el.classList.add("active"); activeEl = el;
+    const n = byId[el.getAttribute("data-key")]; const d = (n && n.detail) || {};
+    panel.innerHTML = `<h3>${esc(n.label)}</h3>`
+      + (d.file ? `<div class="file">${esc(d.file)}</div>` : ``)
+      + (d.what ? `<div class="what">${esc(d.what)}</div>` : ``)
+      + (d.points && d.points.length ? `<ul>${d.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>` : ``)
+      + (d.data ? `<div class="data">📊 ${esc(d.data)}</div>` : ``);
+  });
+});
+</script>
+</body>
+</html>

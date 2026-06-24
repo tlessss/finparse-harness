@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FinParseAI · 全流程可视化</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1419;color:#e5e7eb;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{padding:24px 32px 4px}header h1{margin:0;font-size:22px}header p{margin:6px 0 0;color:#9ca3af;font-size:13px}
+  #legend{display:flex;gap:16px;flex-wrap:wrap;padding:10px 32px;font-size:12px;color:#9ca3af}
+  #legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .wrap{display:flex;gap:20px;padding:8px 32px 40px;align-items:flex-start}
+  .diagram{flex:1 1 auto;min-width:0;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:8px}
+  svg{width:100%;height:auto;display:block}
+  .panel{flex:0 0 330px;position:sticky;top:16px;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:18px;min-height:240px}
+  .panel h3{margin:0 0 4px;font-size:16px}
+  .panel .file{font-family:ui-monospace,monospace;font-size:12px;color:#58a6ff;word-break:break-all}
+  .panel .what{margin:12px 0;font-size:13.5px;line-height:1.6;color:#d1d5db}
+  .panel ul{margin:8px 0;padding-left:18px;font-size:12.5px;line-height:1.7;color:#b9c0c8}
+  .panel .data{margin-top:12px;padding:8px 10px;background:#0d1117;border-radius:8px;font-size:12px;color:#8b949e}
+  .panel .hint{color:#6b7280;font-size:12px;line-height:1.7}
+  .node{cursor:pointer}
+  .node rect{transition:filter .15s,stroke-width .15s}
+  .node:hover rect{filter:brightness(1.25)}
+  .node.active rect{stroke-width:3}
+  .node text{pointer-events:none}
+  .lbl{fill:#e5e7eb;font-size:13px;font-weight:600}
+  .sub{fill:#cbd5e1;font-size:10.5px}
+  .edgelbl{fill:#94a3b8;font-size:10.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <p id="subtitle"></p>
+</header>
+<div id="legend"></div>
+<div class="wrap">
+  <div class="diagram"><svg id="svg"></svg></div>
+  <div class="panel" id="panel"><div class="hint">👈 点任意节点看细节（文件 / 职责 / 状态）。实线框 = ✅ 已实现，虚线框 = 🔜 待开发。</div></div>
+</div>
+
+<script>
+/* ════ 数据：FinParseAI 真实流程（依据 docs/架构设计.md + src/）════ */
+const META = {
+  title: "FinParseAI · 全流程可视化",
+  subtitle: "LangGraph 流水线 parse→validate→decide→db_write→report · 规则 YAML 驱动 · 向量校验 · 实线=✅已实现，虚线=🔜待开发",
+};
+
+const GROUPS = {
+  input:    { color: "#1f6feb", label: "网关/输入" },
+  engine:   { color: "#0891b2", label: "解析引擎" },
+  parser:   { color: "#0ea5e9", label: "解析器（YAML 规则驱动）" },
+  validate: { color: "#7c3aed", label: "校验" },
+  decide:   { color: "#b45309", label: "决策 / 迭代" },
+  data:     { color: "#15803d", label: "数据落库" },
+  output:   { color: "#db2777", label: "报告" },
+};
+
+const NODES = [
+  { id: "gateway", row: 0, group: "input", w: 440, label: "① FastAPI 网关 :8200  ✅",
+    sub: "/parse · /parse/by-code · /results",
+    detail: { file: "src/api.py",
+      what: "HTTP 网关。按 stock_code+report_year 从 PDF 缓存取文件解析，或上传单文件。",
+      points: ["命中 PDF 缓存才解析，否则 404", "/parse/batch、/validate、/review 等为 🔜"], data: "✅ 已实现" } },
+
+  { id: "parse", row: 1, group: "engine", w: 440, label: "② parse_pdf 节点  ✅",
+    sub: "LangGraph 流水线起点 · 调度 engine_orchestrator",
+    detail: { file: "src/agents/workflow.py · src/engine_orchestrator.py",
+      what: "LangGraph 状态机第一节点。run_parse_workflow 调 FinParseAI 编排器，跑 6 个解析器。",
+      points: ["流水线：parse → validate → decide → db_write → report"], data: "✅" } },
+
+  { id: "parsers", row: 2, group: "parser", w: 520, label: "③ 6 解析器（规则 YAML 驱动）  ✅",
+    sub: "营收 / 研发 / 员工 / 成本 / 前五大供应商客户 · pdfplumber 提表",
+    detail: { file: "src/parsers/*.py + src/parser_rules/industry_default.yaml",
+      what: "每个字段一个解析器，逻辑（页码范围/列索引/关键词）由 YAML 规则驱动，不是硬编码 Python。",
+      points: ["对比 agent-platform：那边是 Python 补丁 patches/，这边是 YAML 规则",
+               "helper：unit_detector / page_locator / table_scanner / selector",
+               "🔜 跨版式自适应：用关键词搜页码，不依赖硬编码 pages（当前 P0 焦点）"], data: "✅ 解析器就绪 · 自适应 🔜" } },
+
+  { id: "assemble", row: 3, group: "engine", w: 420, label: "④ 统一 JSON 组装  ✅",
+    sub: "7 字段 + parse_flags（rev/rnd/emp/cost/...）",
+    detail: { file: "src/engine_orchestrator.py",
+      what: "把 6 解析器结果组装成统一结构，附 parse_flags 标记每字段 ok/missing。",
+      data: "✅" } },
+
+  { id: "validate", row: 4, group: "validate", w: 460, label: "⑤ 校验（向量 + LLM）  ✅已接入",
+    sub: "vector_validator(BGE) 真的被 validate 节点调用",
+    detail: { file: "src/agents/workflow.py(node_validate) · src/validators/vector_validator.py(342行)",
+      what: "validate 节点调 VectorValidator(BGE/cosine, 接 quantification rag_data)做三重校验，叠加 LLM；可通过开关跳过。",
+      points: ["⚠ 架构文档标 🔜，但代码里向量校验已接入 —— 以代码为准", "三重校验：语义 / 逻辑 / 完整性", "跳过时直接 validation_passed=True"], data: "✅ 已接入主流程（可跳过）" } },
+
+  { id: "decide", row: 5, group: "decide", w: 460, planned: true, label: "⑥ decide 决策  🔜",
+    sub: "全通过 / 部分异常 / 严重异常 三分支",
+    detail: { file: "（架构设计的节点，workflow.py 图里实际没有）",
+      what: "设计为三分支：全通过→归档；部分异常→迭代；严重异常/3 次失败→人工。",
+      points: ["⚠ 实际 workflow 是 parse→validate→db_write→report 线性，validate 直接连 db_write"], data: "🔜 未接入主流程" } },
+
+  { id: "archive", row: 6, group: "data", w: 250, label: "归档写库  ✅",
+    sub: "caibaoxia financial_reports",
+    detail: { file: "src/database.py",
+      what: "全字段通过 → 写回 financial_reports（6 JSON + 30+ DECIMAL 字段），data_source=hybrid。",
+      data: "✅ 与 agent-platform 共用同一个 caibaoxia 库" } },
+
+  { id: "iterate", row: 6, group: "decide", w: 280, planned: true, label: "迭代：优化 Agent  🔜",
+    sub: "根因诊断 → 改 YAML → 二次解析",
+    detail: { file: "src/agents/optimizer.py · iteration.py · experience_db.py",
+      what: "部分异常 → AI 根因诊断 → 双模式(改现有 YAML / 新建版式 YAML) → 二次解析 → 二次校验。经验写入 experience_db。",
+      points: ["改的是 YAML 规则，不是 Python 补丁", "experience_db.json 记录每次修复，越用越准（PRD 的元学习）", "⚠ optimizer.py/iteration.py 已实现，但未 add_node 进 workflow"], data: "🔜 代码已写，未接入主流程" } },
+
+  { id: "human", row: 6, group: "decide", w: 230, planned: true, label: "人工复核  🔜",
+    sub: "异常拦截 → 修正 → 入库",
+    detail: { file: "src/review/manager.py(303行)",
+      what: "严重异常或 3 次失败 → 拦截 → 人工修正数据 → 标注入库 → 更新向量库。",
+      points: ["模块已实现，但未接入 workflow"], data: "🔜 代码已写，未接入" } },
+
+  { id: "report", row: 7, group: "output", w: 420, label: "⑦ 生成报告  ✅",
+    sub: "generate_report.py · validate_v4_report.py",
+    detail: { file: "generate_report.py（40KB）· validate_v4_report.py（36KB）",
+      what: "对归档结果生成解析报告 / 校验 v4 报告。",
+      data: "✅" } },
+];
+
+const EDGES = [
+  { from: "gateway", to: "parse", label: "缓存命中" },
+  { from: "parse", to: "parsers" },
+  { from: "parsers", to: "assemble" },
+  { from: "assemble", to: "validate" },
+  { from: "validate", to: "decide" },
+  { from: "decide", to: "archive", label: "全通过" },
+  { from: "decide", to: "iterate", label: "部分异常" },
+  { from: "decide", to: "human", label: "严重异常" },
+  { from: "iterate", to: "parse", label: "二次解析（闭环）", dashed: true },
+  { from: "archive", to: "report" },
+];
+/* ════ 渲染引擎（数据驱动 + 自动布局；支持 planned 虚线框 + 多回环错位）════ */
+const W = 880, TOP = 28, ROW_GAP = 118, NODE_H = 58, NODE_W = 300, H_GAP = 26;
+const byId = {};
+NODES.forEach(n => byId[n.id] = n);
+const rows = {};
+NODES.forEach(n => { (rows[n.row] = rows[n.row] || []).push(n); });
+Object.keys(rows).forEach(rk => {
+  const arr = rows[rk];
+  const widths = arr.map(n => n.w || NODE_W);
+  const total = widths.reduce((a, b) => a + b, 0) + H_GAP * (arr.length - 1);
+  let x = (W - total) / 2;
+  arr.forEach((n, i) => {
+    n._w = widths[i]; n._h = n.h || NODE_H;
+    n._x = x; n._y = TOP + Number(n.row) * ROW_GAP;
+    n._cx = x + n._w / 2; n._cy = n._y + n._h / 2;
+    n._top = n._y; n._bot = n._y + n._h;
+    x += widths[i] + H_GAP;
+  });
+});
+const svgH = Math.max(...NODES.map(n => n._bot)) + 36;
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+let svg = `<svg viewBox="0 0 ${W} ${svgH}" xmlns="http://www.w3.org/2000/svg"><defs>
+  <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#6b7280"/></marker>
+</defs>`;
+let backIdx = 0;
+EDGES.forEach(e => {
+  const a = byId[e.from], b = byId[e.to]; if (!a || !b) return;
+  let d, lx, ly, anchor = "start";
+  if (b.row > a.row) { const my = (a._bot + b._top) / 2; d = `M${a._cx},${a._bot} C${a._cx},${my} ${b._cx},${my} ${b._cx},${b._top}`; lx = (a._cx + b._cx) / 2 + 8; ly = my; }
+  else if (b.row === a.row) { d = `M${a._x + a._w},${a._cy} L${b._x},${b._cy}`; lx = (a._x + a._w + b._x) / 2; ly = a._cy - 4; anchor = "middle"; }
+  else { const rx = W - 6 - (backIdx++) * 16; d = `M${a._x + a._w},${a._cy} C${rx},${a._cy} ${rx},${b._cy} ${b._x + b._w},${b._cy}`; lx = rx - 4; ly = (a._cy + b._cy) / 2; anchor = "end"; }
+  svg += `<path d="${d}" fill="none" stroke="#6b7280" stroke-width="1.6"` + (e.dashed ? ` stroke-dasharray="5 4"` : ``) + ` marker-end="url(#arr)"/>`;
+  if (e.label) svg += `<text class="edgelbl" x="${lx}" y="${ly}" text-anchor="${anchor}">${esc(e.label)}</text>`;
+});
+NODES.forEach(n => {
+  const g = GROUPS[n.group] || { color: "#6b7280" };
+  const dash = n.planned ? ` stroke-dasharray="6 4"` : ``;
+  const op = n.planned ? 0.07 : 0.14;
+  svg += `<g class="node" data-key="${n.id}"><rect x="${n._x}" y="${n._y}" width="${n._w}" height="${n._h}" rx="10" fill="${g.color}" fill-opacity="${op}" stroke="${g.color}"${dash}/>`
+       + `<text class="lbl" x="${n._cx}" y="${n._top + (n.sub ? 24 : n._h / 2 + 5)}" text-anchor="middle">${esc(n.label)}</text>`;
+  if (n.sub) svg += `<text class="sub" x="${n._cx}" y="${n._top + 42}" text-anchor="middle">${esc(n.sub)}</text>`;
+  svg += `</g>`;
+});
+svg += `</svg>`;
+document.getElementById("title").textContent = META.title || "";
+document.getElementById("subtitle").textContent = META.subtitle || "";
+document.getElementById("svg").outerHTML = svg;
+document.getElementById("legend").innerHTML = Object.values(GROUPS).map(g => `<span><i class="dot" style="background:${g.color}"></i>${esc(g.label)}</span>`).join("")
+  + `<span style="margin-left:8px"><i class="dot" style="background:transparent;border:1.5px dashed #9ca3af"></i>🔜 待开发（虚线框）</span>`;
+const panel = document.getElementById("panel");
+let activeEl = null;
+document.querySelectorAll(".node").forEach(el => {
+  el.addEventListener("click", () => {
+    if (activeEl) activeEl.classList.remove("active");
+    el.classList.add("active"); activeEl = el;
+    const n = byId[el.getAttribute("data-key")]; const d = (n && n.detail) || {};
+    panel.innerHTML = `<h3>${esc(n.label)}</h3>`
+      + (d.file ? `<div class="file">${esc(d.file)}</div>` : ``)
+      + (d.what ? `<div class="what">${esc(d.what)}</div>` : ``)
+      + (d.points && d.points.length ? `<ul>${d.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>` : ``)
+      + (d.data ? `<div class="data">📊 ${esc(d.data)}</div>` : ``);
+  });
+});
+</script>
+</body>
+</html>

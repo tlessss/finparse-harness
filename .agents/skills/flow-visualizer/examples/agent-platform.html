@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Agent Platform · 全流程（flow-visualizer 范例）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1419;color:#e5e7eb;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{padding:24px 32px 4px}header h1{margin:0;font-size:22px}header p{margin:6px 0 0;color:#9ca3af;font-size:13px}
+  #legend{display:flex;gap:16px;flex-wrap:wrap;padding:10px 32px;font-size:12px;color:#9ca3af}
+  #legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .wrap{display:flex;gap:20px;padding:8px 32px 40px;align-items:flex-start}
+  .diagram{flex:1 1 auto;min-width:0;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:8px}
+  svg{width:100%;height:auto;display:block}
+  .panel{flex:0 0 320px;position:sticky;top:16px;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:18px;min-height:240px}
+  .panel h3{margin:0 0 4px;font-size:16px}
+  .panel .file{font-family:ui-monospace,monospace;font-size:12px;color:#58a6ff;word-break:break-all}
+  .panel .what{margin:12px 0;font-size:13.5px;line-height:1.6;color:#d1d5db}
+  .panel ul{margin:8px 0;padding-left:18px;font-size:12.5px;line-height:1.7;color:#b9c0c8}
+  .panel .data{margin-top:12px;padding:8px 10px;background:#0d1117;border-radius:8px;font-size:12px;color:#8b949e}
+  .panel .hint{color:#6b7280;font-size:12px;line-height:1.7}
+  .node{cursor:pointer}
+  .node rect{transition:filter .15s,stroke-width .15s}
+  .node:hover rect{filter:brightness(1.25)}
+  .node.active rect{stroke-width:3}
+  .node text{pointer-events:none}
+  .lbl{fill:#e5e7eb;font-size:13.5px;font-weight:600}
+  .sub{fill:#cbd5e1;font-size:11px}
+  .edgelbl{fill:#94a3b8;font-size:10.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <p id="subtitle"></p>
+</header>
+<div id="legend"></div>
+<div class="wrap">
+  <div class="diagram"><svg id="svg"></svg></div>
+  <div class="panel" id="panel"><div class="hint">👈 点任意节点看细节。</div></div>
+</div>
+
+<script>
+/* ════ 数据：Agent Platform 真实流程（数字为 2025 实测）════ */
+const META = {
+  title: "Agent Platform · 全流程可视化",
+  subtitle: "数据来源 → 容器 → 自主 Agent 循环 → 解析自愈 → 回写。点节点看细节。",
+};
+
+const GROUPS = {
+  source:    { color: "#1f6feb", label: "数据来源" },
+  container: { color: "#0891b2", label: "容器层（工作范围）" },
+  agent:     { color: "#7c3aed", label: "自主 Agent（tool-use 循环）" },
+  tool:      { color: "#8b5cf6", label: "工具" },
+  optimizer: { color: "#b45309", label: "解析自愈" },
+  output:    { color: "#15803d", label: "回写主数据" },
+};
+
+const NODES = [
+  { id: "source", row: 0, group: "source", w: 440, label: "① 数据来源 · 上游 book-agent", sub: "financial_reports 主数据  ·  PDF 缓存 1289 个文件",
+    detail: { file: "（不在本仓库）→ caibaoxia 库 + book-agent/output/pdf_cache",
+      what: "book-agent 抓取财报、下载 PDF、维护 financial_reports。agent-platform 只消费，不产生原始数据。",
+      points: ["financial_reports：每行 = 一家公司某年的财报", "PDF 文件名 {股票码}_{年份}.pdf"], data: "PDF 缓存 1289 个文件" } },
+
+  { id: "container", row: 1, group: "container", w: 480, label: "② 容器层 · cached_reports.py", sub: "枚举缓存 1282 工作单元 → 只读 join 库标状态 → 待处理 1225",
+    detail: { file: "backend/agents/cached_reports.py",
+      what: "把 PDF 缓存目录当工作容器：有 PDF 才在范围内。一次只读 join financial_reports 给每份贴状态，只把没做好的交给 Agent。",
+      points: ["1282 工作单元（2025: 1249）", "状态 unparsed / low_quality / ok / no_record", "只跑 unparsed + low_quality"], data: "2025 待处理 1225（unparsed 1181 + low_quality 44）" } },
+
+  { id: "agent", row: 2, group: "agent", w: 460, label: "③ 自主 Agent · tool-use 循环", sub: "🧠 deepseek-chat · 模型自己决定调哪个工具 · 结果回灌 · 再决定",
+    detail: { file: "backend/agents/autonomous_supervisor.py",
+      what: "控制流在模型手里：每轮看状态 + 工具清单，自己选工具，结果回灌后再决定，直到收手。这就是自主性。",
+      points: ["tool_choice='auto' 是自主性开关", "护栏 max_steps / max_parses", "状态实时写 _AGENT_STATE 供前端轮询"], data: "4 个工具 · 大脑模型可单独换更强的" } },
+
+  { id: "t_status", row: 3, group: "tool", w: 188, label: "get_container_status",
+    detail: { file: "autonomous_supervisor.py", what: "查容器整体状态，判断有多少活儿。", data: "通常 Agent 第一步" } },
+  { id: "t_list", row: 3, group: "tool", w: 188, label: "list_work",
+    detail: { file: "autonomous_supervisor.py", what: "列出需要处理的报告，拿 report_id。", points: ["包装 list_work_items()"] } },
+  { id: "t_parse", row: 3, group: "tool", w: 188, label: "parse_report ⚠",
+    detail: { file: "autonomous_supervisor.py → run_optimizer", what: "真正解析一份（花 token），受 max_parses 限制。", points: ["下钻到 ④ ParseOptimizer"], data: "返回 A/B/C/D" } },
+  { id: "t_human", row: 3, group: "tool", w: 188, label: "mark_for_human",
+    detail: { file: "autonomous_supervisor.py", what: "搞不定的标记需人工，附原因，继续别的。" } },
+
+  { id: "optimizer", row: 4, group: "optimizer", w: 480, label: "④ parse_report → ParseOptimizer", sub: "pdfplumber → LLM 直提 → AI 评分 → 自修(≤2) → 定级 A/B/C/D",
+    detail: { file: "backend/agents/parse_optimizer.py（run_optimizer）",
+      what: "一份报告的'自己解析 + 自己检查 + 自己修'。先规则零 token，不行才上 LLM；评分发现问题就自动修。",
+      points: ["先规则后 LLM —— 先搞定再说", "评分 = 规则×0.3 + AI×0.7", "C/D 进修复循环，仍不行才标人工"], data: "A≥0.85 B≥0.70 C≥0.50 D<0.50" } },
+
+  { id: "writeback", row: 5, group: "output", w: 420, label: "⑤ 回写 financial_reports", sub: "*_breakdown（JSON）+ quality_score + pdf_parsed_at",
+    detail: { file: "financial_reports 表",
+      what: "把解析结果写回主数据，形成闭环：下次容器富化时，这份就从 unparsed 变 ok。",
+      points: ["写 *_breakdown / quality_score / pdf_parsed_at"], data: "闭环 → 待处理数下降" } },
+];
+
+const EDGES = [
+  { from: "source", to: "container", label: "枚举 + 富化" },
+  { from: "container", to: "agent", label: "只把待处理交给 Agent" },
+  { from: "agent", to: "t_status" },
+  { from: "agent", to: "t_list" },
+  { from: "agent", to: "t_parse" },
+  { from: "agent", to: "t_human" },
+  { from: "t_list", to: "agent", label: "结果回灌（循环）", dashed: true },
+  { from: "t_parse", to: "optimizer", label: "下钻" },
+  { from: "optimizer", to: "writeback" },
+  { from: "writeback", to: "container", label: "闭环", dashed: true },
+];
+/* ════ 渲染引擎（与 references/template.html 一致，无需改）════ */
+const W = 860, TOP = 28, ROW_GAP = 116, NODE_H = 58, NODE_W = 300, H_GAP = 26;
+const byId = {};
+NODES.forEach(n => byId[n.id] = n);
+const rows = {};
+NODES.forEach(n => { (rows[n.row] = rows[n.row] || []).push(n); });
+Object.keys(rows).forEach(rk => {
+  const arr = rows[rk];
+  const widths = arr.map(n => n.w || NODE_W);
+  const total = widths.reduce((a, b) => a + b, 0) + H_GAP * (arr.length - 1);
+  let x = (W - total) / 2;
+  arr.forEach((n, i) => {
+    n._w = widths[i]; n._h = n.h || NODE_H;
+    n._x = x; n._y = TOP + Number(n.row) * ROW_GAP;
+    n._cx = x + n._w / 2; n._cy = n._y + n._h / 2;
+    n._top = n._y; n._bot = n._y + n._h;
+    x += widths[i] + H_GAP;
+  });
+});
+const svgH = Math.max(...NODES.map(n => n._bot)) + 36;
+function edgePath(a, b) {
+  if (b.row > a.row) { const my = (a._bot + b._top) / 2; return `M${a._cx},${a._bot} C${a._cx},${my} ${b._cx},${my} ${b._cx},${b._top}`; }
+  else if (b.row === a.row) { return `M${a._x + a._w},${a._cy} L${b._x},${b._cy}`; }
+  else { const rx = W - 6; return `M${a._x + a._w},${a._cy} C${rx},${a._cy} ${rx},${b._cy} ${b._x + b._w},${b._cy}`; }
+}
+function edgeLabelPos(a, b) {
+  if (b.row > a.row) return { x: (a._cx + b._cx) / 2 + 8, y: (a._bot + b._top) / 2 };
+  if (b.row === a.row) return { x: (a._x + a._w + b._x) / 2, y: a._cy - 4 };
+  return { x: W - 4, y: (a._cy + b._cy) / 2 };
+}
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+let svg = `<svg viewBox="0 0 ${W} ${svgH}" xmlns="http://www.w3.org/2000/svg"><defs>
+  <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#6b7280"/></marker>
+</defs>`;
+EDGES.forEach(e => {
+  const a = byId[e.from], b = byId[e.to]; if (!a || !b) return;
+  svg += `<path d="${edgePath(a, b)}" fill="none" stroke="#6b7280" stroke-width="1.6"` + (e.dashed ? ` stroke-dasharray="5 4"` : ``) + ` marker-end="url(#arr)"/>`;
+  if (e.label) { const p = edgeLabelPos(a, b); svg += `<text class="edgelbl" x="${p.x}" y="${p.y}">${esc(e.label)}</text>`; }
+});
+NODES.forEach(n => {
+  const g = GROUPS[n.group] || { color: "#6b7280" };
+  svg += `<g class="node" data-key="${n.id}"><rect x="${n._x}" y="${n._y}" width="${n._w}" height="${n._h}" rx="10" fill="${g.color}" fill-opacity="0.14" stroke="${g.color}"/>`
+       + `<text class="lbl" x="${n._cx}" y="${n._top + (n.sub ? 24 : n._h / 2 + 5)}" text-anchor="middle">${esc(n.label)}</text>`;
+  if (n.sub) svg += `<text class="sub" x="${n._cx}" y="${n._top + 42}" text-anchor="middle">${esc(n.sub)}</text>`;
+  svg += `</g>`;
+});
+svg += `</svg>`;
+document.getElementById("title").textContent = META.title || "";
+document.getElementById("subtitle").textContent = META.subtitle || "";
+document.getElementById("svg").outerHTML = svg;
+document.getElementById("legend").innerHTML = Object.values(GROUPS).map(g => `<span><i class="dot" style="background:${g.color}"></i>${esc(g.label)}</span>`).join("");
+const panel = document.getElementById("panel");
+let activeEl = null;
+document.querySelectorAll(".node").forEach(el => {
+  el.addEventListener("click", () => {
+    if (activeEl) activeEl.classList.remove("active");
+    el.classList.add("active"); activeEl = el;
+    const n = byId[el.getAttribute("data-key")]; const d = (n && n.detail) || {};
+    panel.innerHTML = `<h3>${esc(n.label)}</h3>`
+      + (d.file ? `<div class="file">${esc(d.file)}</div>` : ``)
+      + (d.what ? `<div class="what">${esc(d.what)}</div>` : ``)
+      + (d.points && d.points.length ? `<ul>${d.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>` : ``)
+      + (d.data ? `<div class="data">📊 ${esc(d.data)}</div>` : ``);
+  });
+});
+</script>
+</body>
+</html>
