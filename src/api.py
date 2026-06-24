@@ -377,6 +377,35 @@ def export_parser_versions(limit: int = 20):
     return {"versions": get_parser_version_history(limit=limit)}
 
 
+# ── 控制 / 审核台（给前端 console）──
+
+class RecodeRequest(BaseModel):
+    stock_code: str
+    year: int = 2025
+    code: str
+
+
+@app.post("/control/{action}")
+def console_control(action: str):
+    """暂停/继续/停止跑批。action ∈ pause|resume|stop。"""
+    from src.console_service import control
+    return control(action)
+
+
+@app.get("/heal/records")
+def console_heal_records():
+    """自愈活动记录（路由实跑产出）。"""
+    from src.console_service import heal_records
+    return {"records": heal_records()}
+
+
+@app.post("/review/recode")
+def console_recode(req: RecodeRequest):
+    """人改解析器代码 → 重过闸 → 返回 {score, exact, mismatches}。"""
+    from src.console_service import recode
+    return recode(req.stock_code, req.year, req.code)
+
+
 # ── 启动入口 ──
 
 if __name__ == "__main__":
