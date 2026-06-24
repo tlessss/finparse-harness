@@ -4,7 +4,7 @@ import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "."))
 
-from src.parsers.layout_fingerprint import compute_fingerprint, _detect_doc_type
+from src.parsers.infra.layout_fingerprint import compute_fingerprint, _detect_doc_type
 
 CACHE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..",
                      "book-agent", "output", "pdf_cache")

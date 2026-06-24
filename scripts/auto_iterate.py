@@ -483,7 +483,7 @@ def _try_quick_fixes(code: str, pdf_path: str, parse_result: Dict, dry_run: bool
     - 检测单位并修复
     - 补充常见的 exclude 词
     """
-    from src.parsers.unit_detector import detect_unit
+    from src.parsers.infra.unit_detector import detect_unit
 
     made_fix = False
 

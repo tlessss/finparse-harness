@@ -10,8 +10,8 @@ import pdfplumber
 import fitz
 
 from src.parsers.base import BaseParser
-from src.parsers.unit_detector import convert_to_yuan
-from src.parsers.table_scanner import is_total_row
+from src.parsers.infra.unit_detector import convert_to_yuan
+from src.parsers.infra.table_scanner import is_total_row
 
 
 class BankRevenueParser(BaseParser):

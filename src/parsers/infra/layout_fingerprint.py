@@ -9,7 +9,7 @@
 指纹只依赖 PyMuPDF 文本（快、确定性），不解析表格。
 
 用法：
-  from src.parsers.layout_fingerprint import compute_fingerprint
+  from src.parsers.infra.layout_fingerprint import compute_fingerprint
   fp = compute_fingerprint("xxx.pdf")
   fp["hash"]       # 短稳定哈希，用于归并
   fp["doc_type"]   # bank / securities / normal

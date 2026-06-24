@@ -5,7 +5,7 @@ from src.parsers.base import BaseParser
 """
 
 from typing import Dict
-from src.parsers.table_scanner import scan_pdf, filter_by_signature
+from src.parsers.infra.table_scanner import scan_pdf, filter_by_signature
 
 
 class EmployeeParser(BaseParser):

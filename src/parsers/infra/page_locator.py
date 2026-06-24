@@ -6,7 +6,7 @@
   3. 缓存结果避免重复扫描（同一份 PDF 同一 section 只搜一次）
 
 用法：
-  from src.parsers.page_locator import locate_pages
+  from src.parsers.infra.page_locator import locate_pages
   
   # 自动搜索包含"营业收入构成"或"主营业务分"的页码
   pages = locate_pages(pdf_path, ["营业收入构成", "主营业务分"])

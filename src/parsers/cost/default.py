@@ -5,8 +5,8 @@ from src.parsers.base import BaseParser
 """
 
 from typing import Dict
-from src.parsers.table_scanner import scan_pdf, filter_by_signature, detect_column_types, parse_money, cell_str
-from src.parsers.unit_detector import detect_unit, convert_to_yuan
+from src.parsers.infra.table_scanner import scan_pdf, filter_by_signature, detect_column_types, parse_money, cell_str
+from src.parsers.infra.unit_detector import detect_unit, convert_to_yuan
 
 
 class CostParser(BaseParser):

@@ -6,7 +6,7 @@ from src.parsers.base import BaseParser
 
 import re
 from typing import Dict, Optional
-from src.parsers.table_scanner import scan_pdf, cell_str
+from src.parsers.infra.table_scanner import scan_pdf, cell_str
 
 
 class TopSupplierParser(BaseParser):

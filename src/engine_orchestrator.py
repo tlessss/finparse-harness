@@ -43,7 +43,7 @@ class FinParseAI:
         start = time.time()
 
         # ── 全量表格一次扫描，共享给所有解析器 ──
-        from src.parsers.table_scanner import scan_pdf
+        from src.parsers.infra.table_scanner import scan_pdf
         all_tables = scan_pdf(pdf_path)
 
         # ── 使用选择器动态选择解析器 ──

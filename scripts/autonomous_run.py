@@ -57,7 +57,7 @@ def _parse_one(task: dict) -> dict:
     signal.alarm(timeout_sec)
     try:
         from src.validators.hard_rules import check_hard_rules
-        from src.parsers.layout_fingerprint import compute_fingerprint
+        from src.parsers.infra.layout_fingerprint import compute_fingerprint
 
         fp = compute_fingerprint(path)
         r = _get_engine().run(path, stock_code=code, report_year=year, db_write=False)

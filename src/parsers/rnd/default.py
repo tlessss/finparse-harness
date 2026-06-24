@@ -5,7 +5,7 @@ from src.parsers.base import BaseParser
 """
 
 from typing import Dict
-from src.parsers.table_scanner import (scan_pdf, filter_by_signature, detect_column_types,
+from src.parsers.infra.table_scanner import (scan_pdf, filter_by_signature, detect_column_types,
                                         parse_money, parse_ratio, cell_str)
 
 
