@@ -55,7 +55,8 @@ def _check_revenue(rev: Dict) -> List[Dict]:
     if not isinstance(rev, dict):
         return violations
 
-    dim_labels = {"segments": "分产品", "industries": "分行业", "regions": "分地区"}
+    dim_labels = {"segments": "分产品", "industries": "分行业", "regions": "分地区",
+                  "by_channel": "分销售模式"}
     for dim, label in dim_labels.items():
         items = rev.get(dim) or []
         if not items:

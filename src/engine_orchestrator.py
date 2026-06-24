@@ -38,13 +38,16 @@ class FinParseAI:
         return cls(self.rule)
 
     def run(self, pdf_path: str, stock_code: str = None, report_year: int = None,
-            company_name: str = None, db_write: bool = True) -> Dict:
-        """执行一次完整的财报解析"""
+            company_name: str = None, db_write: bool = True, pre_scan: list = None) -> Dict:
+        """执行一次完整的财报解析。pre_scan 可传入已抽好的表，避免重复扫描（注册表多候选共享）。"""
         start = time.time()
 
-        # ── 全量表格一次扫描，共享给所有解析器 ──
-        from src.parsers.infra.table_scanner import scan_pdf
-        all_tables = scan_pdf(pdf_path)
+        # ── 全量表格一次扫描，共享给所有解析器（可由外部预先扫好传入）──
+        if pre_scan is None:
+            from src.parsers.infra.table_scanner import scan_pdf
+            all_tables = scan_pdf(pdf_path)
+        else:
+            all_tables = pre_scan
 
         # ── 使用选择器动态选择解析器 ──
         rev_parser = self._get_parser("revenue_breakdown", pdf_path)

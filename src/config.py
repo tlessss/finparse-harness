@@ -9,11 +9,8 @@ load_dotenv(ROOT / ".env")
 
 
 class Config:
-    # ── 数据库（复用 caibaoxia） ──
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "mysql+pymysql://tless:Tjhwn30998k@main-tless.mysql.polardb.rds.aliyuncs.com:3306/caibaoxia",
-    )
+    # ── 数据库（复用 caibaoxia）—— 凭据只从 .env 读取，不在代码里硬编码 ──
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
     # ── LLM ──
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")

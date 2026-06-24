@@ -2,6 +2,10 @@ from src.parsers.base import BaseParser
 """员工构成解析器 EmployeeParser
 
 内容特征识别：扫描全文表格 → 识别员工表 → 自动提取
+
+注：曾尝试"标准类别白名单 + mode 跨表持续"修跨页漏行（000088 等），
+但 mode 跨表会把 education 段落漏进不相关表 → 300001/300005 回归（净通过 0 提升 + 有回归）。
+按"不把对的改坏"已回滚。员工跨页漏行留待专用解析器方案（见 docs/多agent编排设计.md）。
 """
 
 from typing import Dict
@@ -22,7 +26,6 @@ class EmployeeParser(BaseParser):
         result = {"total": None, "parent": None, "composition": [], "education": []}
         for m in matches:
             partial = self._parse_table(m["table"])
-            # 合并
             if partial.get("total") and result["total"] is None:
                 result["total"] = partial["total"]
             if partial.get("parent") and result["parent"] is None:

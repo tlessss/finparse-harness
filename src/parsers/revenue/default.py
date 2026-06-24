@@ -11,6 +11,8 @@ import fitz
 from src.parsers.base import BaseParser
 from src.parsers.infra.unit_detector import detect_unit, convert_to_yuan
 from src.parsers.infra.table_scanner import is_total_row
+from src.parsers.infra.header_columns import detect_columns_by_header
+from src.parsers.infra.rule_loader import load_rule
 
 
 class RevenueParser(BaseParser):
@@ -25,6 +27,29 @@ class RevenueParser(BaseParser):
         sec = (self.rule or {}).get("revenue_section", {}) or {}
         return set(sec.get("extra_exclude_names", []) or [])
 
+    def _header_aliases(self) -> Optional[dict]:
+        """加载规范驱动的表头别名（revenue.yaml）；缺失则返回 None 走旧统计法。"""
+        rule = load_rule("revenue")
+        if not rule:
+            return None
+        return rule.get("revenue_breakdown", {}).get("header_aliases")
+
+    def _resolve_columns(self, table: list):
+        """
+        M1：表头驱动认列（含占比闸门）。
+        - name/amount：表头优先，缺失回退统计法。
+        - ratio：只有表头命中"占营业收入比重"类别名才取；否则置空，绝不拿毛利率顶替。
+        """
+        stat_name, stat_amount, stat_ratio = self._detect_columns(table)
+        aliases = self._header_aliases()
+        if not aliases:
+            return stat_name, stat_amount, stat_ratio   # 无规则 → 旧逻辑
+        hdr = detect_columns_by_header(table, aliases)
+        name_col = hdr.get("name") if hdr.get("name") is not None else stat_name
+        amount_col = hdr.get("revenue") if hdr.get("revenue") is not None else stat_amount
+        ratio_col = hdr.get("ratio")    # 闸门：表头命中占比别名才取；否则置空
+        return name_col, amount_col, ratio_col
+
     def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
         candidate_pages = self._find_candidate_pages(pdf_path)
         if not candidate_pages:
@@ -36,13 +61,49 @@ class RevenueParser(BaseParser):
             return {"revenue_breakdown": None, "status": "no_table_found"}
 
         unit_ratio = self._detect_unit_from_pdf(pdf_path, candidate_pages)
-        best = revenue_tables[0]
+        best = self._select_best_table(revenue_tables)
         result = self._classify(best, unit_ratio=unit_ratio)
         return {"revenue_breakdown": result, "status": "ok"}
+
+    def _select_best_table(self, tables: list) -> list:
+        """
+        M2 A/B 表择优：在已按分数排序的候选表里，优先选 (A) 占比构成表，
+        其次才退回最高分表（可能是 (B) 毛利率表）。
+        —— 解决"挑错表"（如徐工挑到毛利率表）。
+        """
+        rule = load_rule("revenue")
+        if not rule:
+            return tables[0]
+        rb = rule.get("revenue_breakdown", {})
+        from src.parsers.infra.header_columns import classify_revenue_table
+        comps = [t for t in tables if classify_revenue_table(t, rb) == "composition"]
+        return comps[0] if comps else tables[0]
 
     # ── 以下方法完全来自原 revenue_parser.py ──
 
     def _find_candidate_pages(self, pdf_path: str) -> List[int]:
+        """
+        找页（规范驱动）：按信号强度打分取 top-N 页，不再按页码盲截断。
+        有规则走 SectionLocator；无规则回退旧关键词逻辑。
+        """
+        rule = load_rule("revenue")
+        fp = (rule or {}).get("revenue_breakdown", {}).get("find_page") if rule else None
+        if fp:
+            from src.parsers.infra.section_locator import rank_pages
+            pages = rank_pages(
+                pdf_path,
+                strong=fp.get("strong", []),
+                weak=fp.get("weak", []),
+                prefer_section=fp.get("prefer_section"),
+                min_page=fp.get("min_page", 1),
+                top_n=fp.get("top_n", 12),
+                window=fp.get("window", 1),
+            )
+            if pages:
+                return pages
+        return self._find_candidate_pages_legacy(pdf_path)
+
+    def _find_candidate_pages_legacy(self, pdf_path: str) -> List[int]:
         _REVENUE_KEYWORDS = [
             "营业收入", "营收", "主营业务", "收入构成",
             "分产品", "分行业", "分地区", "收入与成本",
@@ -209,7 +270,8 @@ class RevenueParser(BaseParser):
         return name_col, amount_col, ratio_col
 
     def _classify(self, table: list, unit_ratio: int = 1) -> Dict:
-        section_labels = {"分行业": "industries", "分产品": "segments", "分地区": "regions"}
+        section_labels = {"分行业": "industries", "分产品": "segments", "分地区": "regions",
+                          "分销售模式": "by_channel", "分销售渠道": "by_channel"}
         sections = []
         for row in table:
             found = None
@@ -219,9 +281,9 @@ class RevenueParser(BaseParser):
                     break
             sections.append(found)
 
-        name_col, amount_col, ratio_col = self._detect_columns(table)
+        name_col, amount_col, ratio_col = self._resolve_columns(table)
 
-        result = {"segments": [], "industries": [], "regions": []}
+        result = {"segments": [], "industries": [], "regions": [], "by_channel": []}
         current = "segments"
         seen = {}
 
