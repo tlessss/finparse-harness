@@ -14,7 +14,11 @@
       "Bash(npm install *)",
       "Bash(cd *)",
       "Bash(wc -l *)",
-      "Bash(open flow.html)"
+      "Bash(open flow.html)",
+      "WebSearch",
+      "Bash(pkill -f \"scripts.baseline_run\")",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
