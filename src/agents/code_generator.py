@@ -93,18 +93,27 @@ def _feedback(rep: Dict, out_rb: Dict) -> str:
 
 def generate_parser(code: str, year: int, golden_entry: Dict,
                     base_fn: Callable, out_path: str,
-                    max_rounds: int = 8, log=print) -> Dict:
+                    max_rounds: int = 8, mother_path: str = None, log=print) -> Dict:
     """终点=完全正确(exact)。没到 exact 就继续想办法；到上限仍不 exact → 转人工。
-    绝不在半成品(部分正确)上停下。base_fn 仅作安全护栏(不退步)，不是 stop 条件。"""
+    绝不在半成品(部分正确)上停下。base_fn 仅作安全护栏(不退步)，不是 stop 条件。
+    mother_path 给定则 fork 模式：在母本源码基础上改（弱模型更易到 exact）。"""
     tables = get_tables(code, year)
     if tables is None:
         return {"accepted": False, "error": "无缓存表"}
 
     failure = ("v0(现有解析器)在这份上得分 0：它选错了表(把毛利率当占比)、"
                "且分项漏行。请写一个能正确选占比构成表、认对列、提全所有分项的解析器。")
+    if mother_path:
+        with open(mother_path, encoding="utf-8") as f:
+            mother_src = f.read()
+        first = (f"{_CONTRACT}\n\n股票 {code} {year}。\n{_render_candidates(tables)}\n\n{failure}\n\n"
+                 f"下面是一个**相似版式的已认证解析器(母本)**，请**在它基础上改(fork)**来适配本报告，"
+                 f"尽量复用对的部分、只改差异处：\n```python\n{mother_src}\n```")
+    else:
+        first = f"{_CONTRACT}\n\n股票 {code} {year}。\n{_render_candidates(tables)}\n\n{failure}"
     messages = [
         {"role": "system", "content": "你是资深 Python 工程师，精通解析中文财报表格。"},
-        {"role": "user", "content": f"{_CONTRACT}\n\n股票 {code} {year}。\n{_render_candidates(tables)}\n\n{failure}"},
+        {"role": "user", "content": first},
     ]
 
     for r in range(1, max_rounds + 1):
@@ -145,3 +154,28 @@ def generate_parser(code: str, year: int, golden_entry: Dict,
     # 想尽 max_rounds 仍没到 exact → 不留半成品，转人工
     return {"accepted": False, "escalate": "human", "rounds": max_rounds,
             "best_score": score, "out_path": out_path}
+
+
+def repair(code: str, year: int, golden_entry: Dict, base_fn: Callable,
+           out_path: str, catalog=None, fork_lo: float = 0.3, log=print) -> Dict:
+    """
+    三岔修复决策（fork 优先）：先用选择即验证挑最像的已认证母本，据分定路：
+      母本 exact     → 复用(直接用,不调LLM)
+      母本部分(≥lo)  → fork(在母本源码上改)
+      都很差         → 新建(从零写)
+    """
+    from src.eval.parser_catalog import pick_mother
+    mpath, mscore, mkey = pick_mother(code, year, golden_entry["revenue_breakdown"], catalog)
+
+    if mscore >= 0.999:
+        log(f"🔁 复用：已认证母本『{mkey}』对本报告 exact → 直接用，无需生成 LLM")
+        return {"action": "reuse", "accepted": True, "parser": mpath, "score": mscore}
+
+    if mpath and mscore >= fork_lo:
+        log(f"🍴 fork：最像母本『{mkey}』(分{mscore}) → 在它基础上改")
+        r = generate_parser(code, year, golden_entry, base_fn, out_path, mother_path=mpath, log=log)
+    else:
+        log(f"🆕 新建：无合适母本(最高分{mscore}) → 从零写")
+        r = generate_parser(code, year, golden_entry, base_fn, out_path, log=log)
+    r["action"] = "fork" if (mpath and mscore >= fork_lo) else "new"
+    return r
