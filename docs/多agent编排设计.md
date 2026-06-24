@@ -351,9 +351,12 @@ class ParseState(TypedDict, total=False):
 | **M1 溯源基建** | 抽表层保留 (页码,bbox)；统一解析器契约（带溯源） | 通用解析器输出可溯源到原始单元格 |
 | **M2 注册表 + 路由** 🟡骨架完成 | 注册表分发 + 缩候选 + 跑验证 | ✅ `src/parsers/registry.py`(契约+GenericReportParser+选择即验证)+engine pre_scan，5/5单测(脏专用输给净通用)；待接批处理 |
 | **M3 人工 review UI** | 结果↔原文对照 + 溯源高亮 + 三动作 | 人能对照原文一键认证 |
-| **M4 代码沙箱** | 单份隔离跑 + 硬规则门 + git 版本化 | 候选解析器自动 accept/reject |
-| **M5 生成专用解析器智能体** | LLM 写解析器 + few-shot + 负反馈回灌 | 死信生成→认证成功率 ≥50% |
+| **验证地基** | ✅ 已建：打分器 `eval/revenue_score` + 多版本评估/版本闸 `eval/run_eval` + 抽表缓存 `eval/table_cache` + 沙箱加载器 `eval/sandbox_exec`（43 测试绿）| 任意解析器版本对值级 golden 客观打分、accept/reject |
+| **M4 代码沙箱** | ✅ demo：版本文件 `parse(tables)->revenue_breakdown` 在缓存表上跑 + 硬规则/打分门 | 候选解析器自动 accept/reject（subprocess 隔离待硬化）|
+| **M5 生成专用解析器智能体** | ✅ demo（人工当 LLM）：徐工 000425 v0=0.0→v1=1.0，闸 accept。**待自动化**：程序化调 LLM | 死信生成→认证成功率 ≥50% |
 | **M6 会话主管层** | 聊天框 + 工具调用循环 + 多轮记忆 | 自然语言驱动全流程 |
+
+> **模型路由（构建期，§五）**：codegen（M5 生成/改解析器）用强模型 **Claude Opus 4.8**（`claude-opus-4-8`，走 anthropic 官方 SDK，**非** OpenAI 兼容 base_url；`thinking=adaptive`+`effort=high`）——构建期一次性、按版式摊薄，值得上强模型；诊断/裁判/路由等高频低风险角色用便宜模型（现状 DeepSeek）。
 
 **依赖关系（必须点破）**：M5（生成智能体）依赖 M1（溯源/契约）+ M4（沙箱）。没有沙箱和契约，生成的解析器无从验证、无从分发。**先把验证地基和注册表搭好，最后才放生成智能体进去。**
 
