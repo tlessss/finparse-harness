@@ -94,3 +94,26 @@ def test_emp_plausibility_dirty():
     bad = {"total": 1000, "composition": [
         {"name": "生产人员", "count": 600}, {"name": "技术人员", "count": 100}]}  # 和700≠1000
     assert field_plausibility(EMPLOYEE, bad)["clean"] is False
+
+
+# ── D类(客户/供应商：明细占比和≈前五合计；复用B类) ──
+from src.eval.field_spec import TOP_CLIENTS
+
+_TOP_GOLD = {"total_ratio_pct": 45.0, "top_clients": [
+    {"name": "客户A", "ratio_pct": 20.0},
+    {"name": "客户B", "ratio_pct": 15.0},
+    {"name": "客户C", "ratio_pct": 10.0}]}
+
+
+def test_top_score_exact():
+    s = score_field(TOP_CLIENTS, _TOP_GOLD, _TOP_GOLD)
+    assert s["exact"] is True
+
+
+def test_top_plausibility_sum_eq_total():
+    assert field_plausibility(TOP_CLIENTS, _TOP_GOLD)["clean"] is True
+
+
+def test_top_no_detail_needs_human():
+    # 准则:明细可缺失且合规 → 无明细自动判不了(not clean) → 转人工
+    assert field_plausibility(TOP_CLIENTS, {"total_ratio_pct": 45.0, "top_clients": []})["clean"] is False

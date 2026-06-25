@@ -69,7 +69,26 @@ EMPLOYEE = FieldSpec(
     table_markers=("专业构成", "教育程度", "在职员工"),
     section_anchors=("员工情况", "专业构成"))
 
-FIELDS: Dict[str, FieldSpec] = {f.field: f for f in (REVENUE, COST, RND, EMPLOYEE)}
+# D类(客户/供应商)：判据"前五明细占比之和≈前五合计占比" = B类(部分和≈合计)。
+# 但准则规定明细名单"鼓励非强制"→ 常缺失且合规 → 缺明细时自动判不了 → 转人工(人审是真闸)。
+TOP_CLIENTS = FieldSpec(
+    "top_clients", "ratio_pct", (), cls="B", label="前五大客户", version_prefix="cli",
+    total_key="total_ratio_pct", detail_key="top_clients", ratio_key="_absent",
+    spec_note=("准则第二十五条：前5名客户销售额占比(强制)；明细名单鼓励非强制(可缺失且合规)。"
+               "判据：明细占比之和 ≈ 前五合计占比；无明细→转人工。"),
+    table_markers=("前五大客户", "前5名客户", "主要客户"),
+    section_anchors=("主要客户", "收入与成本"))
+
+TOP_SUPPLIERS = FieldSpec(
+    "top_suppliers", "ratio_pct", (), cls="B", label="前五大供应商", version_prefix="sup",
+    total_key="total_ratio_pct", detail_key="top_suppliers", ratio_key="_absent",
+    spec_note=("准则第二十五条：前5名供应商采购额占比(强制)；明细名单鼓励非强制。"
+               "判据：明细占比之和 ≈ 前五合计占比；无明细→转人工。"),
+    table_markers=("前五大供应商", "前5名供应商", "主要供应商"),
+    section_anchors=("主要供应商", "收入与成本"))
+
+FIELDS: Dict[str, FieldSpec] = {f.field: f for f in (
+    REVENUE, COST, RND, EMPLOYEE, TOP_CLIENTS, TOP_SUPPLIERS)}
 
 
 def get_spec(field: str) -> FieldSpec:
