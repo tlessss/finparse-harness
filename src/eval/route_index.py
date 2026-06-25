@@ -42,17 +42,21 @@ def fingerprint_of(code: str, year: int) -> Optional[str]:
     return fp
 
 
-def route_get(fp: str) -> Optional[str]:
-    return _load(_ROUTE_CACHE).get(fp)
+def _k(field: str, fp: str) -> str:
+    return f"{field}|{fp}"
 
 
-def route_set(fp: str, path: str) -> None:
+def route_get(field: str, fp: str) -> Optional[str]:
+    return _load(_ROUTE_CACHE).get(_k(field, fp))
+
+
+def route_set(field: str, fp: str, path: str) -> None:
     d = _load(_ROUTE_CACHE)
-    d[fp] = path
+    d[_k(field, fp)] = path
     _save(_ROUTE_CACHE, d)
 
 
-def route_invalidate(fp: str) -> None:
+def route_invalidate(field: str, fp: str) -> None:
     d = _load(_ROUTE_CACHE)
-    if d.pop(fp, None) is not None:
+    if d.pop(_k(field, fp), None) is not None:
         _save(_ROUTE_CACHE, d)

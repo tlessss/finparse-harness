@@ -21,7 +21,8 @@ import json
 import os
 from typing import Callable, Dict, List, Optional
 
-from src.eval.revenue_score import score_revenue, _DIMS
+from src.eval.revenue_score import score_field
+from src.eval.field_spec import REVENUE
 
 _GOLDEN_DEFAULT = "goldset/revenue_golden.json"
 
@@ -40,7 +41,7 @@ def _confirmed(entries: List[Dict]) -> List[Dict]:
 
 
 def eval_version(parse_fn: ParseFn, golden_entries: List[Dict],
-                 dims=_DIMS, only_confirmed: bool = True) -> Dict:
+                 spec=REVENUE, only_confirmed: bool = True) -> Dict:
     """
     用一个解析器版本跑遍 golden，逐份打分 + 汇总。
 
@@ -58,7 +59,7 @@ def eval_version(parse_fn: ParseFn, golden_entries: List[Dict],
             per_report.append({"stock_code": code, "year": year,
                                "score": 0.0, "exact": False, "error": str(ex)[:120]})
             continue
-        s = score_revenue(pred, e.get("revenue_breakdown"), dims)
+        s = score_field(spec, pred, e.get(spec.field))
         per_report.append({"stock_code": code, "year": year,
                            "score": s["score"], "exact": s["exact"],
                            "mismatches": s["mismatches"]})
@@ -75,7 +76,7 @@ def eval_version(parse_fn: ParseFn, golden_entries: List[Dict],
 
 
 def compare_versions(versions: Dict[str, ParseFn], golden_entries: List[Dict],
-                     dims=_DIMS) -> Dict:
+                     spec=REVENUE) -> Dict:
     """
     多个版本各跑 golden，出排行榜 + 每份的最优版本。
 
@@ -85,7 +86,7 @@ def compare_versions(versions: Dict[str, ParseFn], golden_entries: List[Dict],
        "results": {版本名: eval_version结果},
        "per_report_best": {(code,year): 版本名}}   # registry 选优依据
     """
-    results = {name: eval_version(fn, golden_entries, dims) for name, fn in versions.items()}
+    results = {name: eval_version(fn, golden_entries, spec) for name, fn in versions.items()}
 
     leaderboard = sorted(
         ((name, r["summary"]["mean_score"], r["summary"]["exact"]) for name, r in results.items()),
@@ -107,13 +108,13 @@ def compare_versions(versions: Dict[str, ParseFn], golden_entries: List[Dict],
 
 
 def best_version_per_report(versions: Dict[str, ParseFn], golden_entries: List[Dict],
-                            dims=_DIMS) -> Dict:
+                            spec=REVENUE) -> Dict:
     """registry 选优：每份 golden 报告 → 当前最优版本名。"""
-    return compare_versions(versions, golden_entries, dims)["per_report_best"]
+    return compare_versions(versions, golden_entries, spec)["per_report_best"]
 
 
 def accept_candidate(base_fn: ParseFn, candidate_fn: ParseFn, golden_entries: List[Dict],
-                     dims=_DIMS, min_gain: float = 1e-6) -> Dict:
+                     spec=REVENUE, min_gain: float = 1e-6) -> Dict:
     """
     版本闸（沙箱/LLM 闭环的直接接口）：LLM 改出 candidate，要不要收？
 
@@ -125,8 +126,8 @@ def accept_candidate(base_fn: ParseFn, candidate_fn: ParseFn, golden_entries: Li
       {"accepted": bool, "base_score": float, "candidate_score": float,
        "regressions": [(code,year), ...], "improved": bool}
     """
-    base = eval_version(base_fn, golden_entries, dims)
-    cand = eval_version(candidate_fn, golden_entries, dims)
+    base = eval_version(base_fn, golden_entries, spec)
+    cand = eval_version(candidate_fn, golden_entries, spec)
     base_by = {(r["stock_code"], r["year"]): r["score"] for r in base["per_report"]}
 
     regressions = []

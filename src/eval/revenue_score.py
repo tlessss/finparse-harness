@@ -1,32 +1,26 @@
 """
-营收解析打分器 — "多解析器 × 多版本" 验证地基的心脏
+占比构成类(A类)字段打分器 — 字段通用(营收/成本…)
 
-给定 某解析器某版本的输出 vs 值级 golden（正确值本身），算出客观分数。
-纯函数、确定性、不碰 PDF，可脱离环境单测。
+给定 某解析器版本的输出 vs 值级 golden，算出客观分数。纯函数、确定性、不碰 PDF。
+按 FieldSpec(amount_key/dims) 同构处理多维字典(营收)与扁平列表(成本)。
 
-用途（一鱼三吃，见 docs/多agent编排设计.md）：
-  1. 沙箱/版本选优：哪个解析器版本对某份/某版式分最高 → registry 认证它
-  2. 让 LLM 自改解析器：改完用它判对错，沙箱才能 accept/reject
-  3. M0′ 拿干净数：认列对了才聚得准
-
-golden 与解析输出**同构**（都是 revenue_breakdown 的 industries/segments/regions），
-所以 seed 时可直接拷"已确认正确"的解析输出，无需另立格式。
+用途(见 docs/多agent编排设计.md)：版本选优/沙箱闸/让LLM自改判对错/M0′干净数。
+golden 与解析输出同构。
 
 用法：
-  from src.eval.revenue_score import score_revenue
-  s = score_revenue(parse_result["revenue_breakdown"], gold["revenue_breakdown"])
-  s["exact"]      # 是否逐行逐值完全命中
-  s["score"]      # 0~1 综合分
-  s["mismatches"] # 逐条差异，给 LLM/人看哪错了
+  from src.eval.revenue_score import score_field, score_revenue
+  from src.eval.field_spec import REVENUE, COST
+  s = score_field(COST, pred_cost, gold_cost)   # 通用
+  s = score_revenue(pred_rb, gold_rb)            # 营收便捷(= score_field(REVENUE))
 """
 
 from typing import Dict, List, Optional
 
-_DIMS = ("industries", "segments", "regions", "by_channel")
+from src.eval.field_spec import FieldSpec, REVENUE, as_dims
 
 # 容差：金额按相对、占比按绝对百分点
-_REV_REL_TOL = 0.01      # 收入相对误差 ≤1%
-_RATIO_ABS_TOL = 0.5     # 占比绝对误差 ≤0.5 个百分点
+_AMOUNT_REL_TOL = 0.01
+_RATIO_ABS_TOL = 0.5
 
 
 def _norm_name(s: Optional[str]) -> str:
@@ -44,13 +38,13 @@ def _num(v):
         return None
 
 
-def _rev_close(a, b) -> bool:
+def _amount_close(a, b) -> bool:
     a, b = _num(a), _num(b)
     if a is None and b is None:
         return True
     if a is None or b is None:
         return False
-    return abs(a - b) <= _REV_REL_TOL * max(abs(a), abs(b), 1.0)
+    return abs(a - b) <= _AMOUNT_REL_TOL * max(abs(a), abs(b), 1.0)
 
 
 def _ratio_close(a, b) -> bool:
@@ -62,8 +56,9 @@ def _ratio_close(a, b) -> bool:
     return abs(a - b) <= _RATIO_ABS_TOL
 
 
-def score_dimension(pred_rows: List[Dict], gold_rows: List[Dict]) -> Dict:
-    """单维度（如 industries）打分：按名称匹配行，再逐值比对。"""
+def score_dimension(pred_rows: List[Dict], gold_rows: List[Dict],
+                    amount_key: str = "revenue_yuan", ratio_key: str = "ratio_pct") -> Dict:
+    """单维度打分：按名称匹配行，再逐值比对（金额相对容差、占比绝对容差）。"""
     pred_rows = pred_rows or []
     gold_rows = gold_rows or []
     gold_by = {_norm_name(r.get("name")): r for r in gold_rows}
@@ -76,18 +71,16 @@ def score_dimension(pred_rows: List[Dict], gold_rows: List[Dict]) -> Dict:
             mismatches.append({"name": grow.get("name"), "issue": "漏行(golden有,输出无)"})
             continue
         matched += 1
-        rev_ok = _rev_close(prow.get("revenue_yuan"), grow.get("revenue_yuan"))
-        rat_ok = _ratio_close(prow.get("ratio_pct"), grow.get("ratio_pct"))
-        if rev_ok and rat_ok:
+        amt_ok = _amount_close(prow.get(amount_key), grow.get(amount_key))
+        rat_ok = _ratio_close(prow.get(ratio_key), grow.get(ratio_key))
+        if amt_ok and rat_ok:
             value_ok += 1
         else:
             mismatches.append({
-                "name": grow.get("name"),
-                "issue": "值不符",
-                "收入": None if rev_ok else {"输出": prow.get("revenue_yuan"), "真值": grow.get("revenue_yuan")},
-                "占比": None if rat_ok else {"输出": prow.get("ratio_pct"), "真值": grow.get("ratio_pct")},
+                "name": grow.get("name"), "issue": "值不符",
+                "金额": None if amt_ok else {"输出": prow.get(amount_key), "真值": grow.get(amount_key)},
+                "占比": None if rat_ok else {"输出": prow.get(ratio_key), "真值": grow.get(ratio_key)},
             })
-    # 多抽的行（输出有，golden 无）
     for pname, prow in pred_by.items():
         if pname not in gold_by:
             mismatches.append({"name": prow.get("name"), "issue": "多行(输出有,golden无)"})
@@ -102,23 +95,14 @@ def score_dimension(pred_rows: List[Dict], gold_rows: List[Dict]) -> Dict:
     }
 
 
-def score_revenue(pred: Optional[Dict], gold: Optional[Dict],
-                  dims=_DIMS) -> Dict:
-    """
-    整份营收打分：只评 golden 里有内容的维度（没标的维度不评，不冤枉）。
-
-    Returns:
-      {"exact": bool, "score": float, "per_dim": {dim: 维度分}, "mismatches": [...]}
-      score = 各评估维度 (row_recall * value_acc) 的均值，再乘整体精确率惩罚多抽。
-    """
-    pred = pred or {}
-    gold = gold or {}
-    per_dim, mismatches = {}, []
-    recalls, precisions = [], []
-    for d in dims:
-        if not (gold.get(d)):       # golden 这个维度没内容 → 不评
+def score_field(spec: FieldSpec, pred, gold) -> Dict:
+    """字段通用打分：只评 golden 里有内容的维度。score = 均(召回×值正确率) × 均精确率。"""
+    pred_d, gold_d = as_dims(pred, spec), as_dims(gold, spec)
+    per_dim, mismatches, recalls, precisions = {}, [], [], []
+    for d, grows in gold_d.items():
+        if not grows:
             continue
-        sd = score_dimension(pred.get(d), gold.get(d))
+        sd = score_dimension(pred_d.get(d), grows, spec.amount_key, spec.ratio_key)
         per_dim[d] = sd
         recalls.append(sd["row_recall"] * sd["value_acc"])
         precisions.append(sd["row_precision"])
@@ -132,13 +116,18 @@ def score_revenue(pred: Optional[Dict], gold: Optional[Dict],
     recall_value = sum(recalls) / len(recalls)
     precision = sum(precisions) / len(precisions)
     score = recall_value * precision
-    exact = (score >= 0.999 and not mismatches)
     return {
-        "exact": exact,
+        "exact": (score >= 0.999 and not mismatches),
         "score": round(score, 4),
         "recall_value": round(recall_value, 4),
         "precision": round(precision, 4),
-        "per_dim": per_dim,
-        "mismatches": mismatches,
-        "evaluated_dims": len(per_dim),
+        "per_dim": per_dim, "mismatches": mismatches, "evaluated_dims": len(per_dim),
     }
+
+
+def score_revenue(pred: Optional[Dict], gold: Optional[Dict], dims=None) -> Dict:
+    """营收便捷入口（= score_field(REVENUE)）。"""
+    return score_field(REVENUE, pred, gold)
+
+
+_DIMS = REVENUE.dims      # 向后兼容

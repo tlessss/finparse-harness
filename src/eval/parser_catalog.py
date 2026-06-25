@@ -14,13 +14,15 @@ from typing import List, Dict, Tuple, Optional
 
 from src.eval.table_cache import get_tables
 from src.eval.sandbox_exec import version_parse_fn
-from src.eval.revenue_score import score_revenue
+from src.eval.revenue_score import score_field
 
 # 认证清单（持久化，认证流程/前端可追加）。首次缺失则以种子写入。
 _MANIFEST = "goldset/certified_parsers.json"
 _SEED: List[Dict] = [
-    {"key": "000425-工程机械占比构成表", "path": "src/parsers/versions/rev_000425_v1.py"},
+    {"key": "000425-工程机械占比构成表", "path": "src/parsers/versions/rev_000425_v1.py",
+     "field": "revenue_breakdown"},
 ]
+_DEFAULT_FIELD = "revenue_breakdown"
 
 
 def load_certified() -> List[Dict]:
@@ -38,16 +40,18 @@ def _save_manifest(parsers: List[Dict]) -> None:
               ensure_ascii=False, indent=2)
 
 
-def certify(key: str, path: str, fingerprints: Optional[List[str]] = None) -> None:
-    """登记一个已 exact 的解析器（去重；记录它认证时的版式指纹，供缩候选）。"""
+def certify(key: str, path: str, field: str = _DEFAULT_FIELD,
+            fingerprints: Optional[List[str]] = None) -> None:
+    """登记一个已 exact 的解析器（去重；记录字段 + 认证时的版式指纹，供按字段缩候选）。"""
     cur = load_certified()
     fps = [f for f in (fingerprints or []) if f]
     for c in cur:
         if c["path"] == path:                      # 已在 → 并入指纹
             c["fingerprints"] = sorted(set(c.get("fingerprints", [])) | set(fps))
+            c.setdefault("field", field)
             _save_manifest(cur)
             return
-    cur.append({"key": key, "path": path, "fingerprints": sorted(set(fps))})
+    cur.append({"key": key, "path": path, "field": field, "fingerprints": sorted(set(fps))})
     _save_manifest(cur)
 
 
@@ -63,9 +67,11 @@ def tag_fingerprint(path: str, fp: str) -> None:
             return
 
 
-def candidates_for(fingerprint: str, catalog: Optional[List[Dict]] = None) -> List[Dict]:
-    """指纹缩候选（召回导向）：有指纹匹配就缩到那几个；没匹配/指纹未知 → 全跑兜底(别漏对的)。"""
+def candidates_for(field: str, fingerprint: str,
+                   catalog: Optional[List[Dict]] = None) -> List[Dict]:
+    """先按字段过滤，再指纹缩候选（召回导向：无匹配/指纹未知 → 该字段全跑兜底）。"""
     catalog = catalog if catalog is not None else load_certified()
+    catalog = [c for c in catalog if c.get("field", _DEFAULT_FIELD) == field]
     if fingerprint:
         hit = [c for c in catalog if fingerprint in (c.get("fingerprints") or [])]
         if hit:
@@ -78,9 +84,12 @@ CERTIFIED: List[Dict] = load_certified()
 
 
 def pick_mother(code: str, year: int, golden_rb: Dict,
-                catalog: List[Dict] = None) -> Tuple:
-    """选择即验证：跑每个已认证解析器 → 对 golden 打分 → 返回 (最优path, 分, key)。"""
-    catalog = catalog if catalog is not None else load_certified()
+                catalog: List[Dict] = None, spec=None) -> Tuple:
+    """选择即验证：跑该字段每个已认证解析器 → 对 golden 打分 → 返回 (最优path, 分, key)。"""
+    from src.eval.field_spec import REVENUE
+    spec = spec or REVENUE
+    if catalog is None:
+        catalog = [c for c in load_certified() if c.get("field", _DEFAULT_FIELD) == spec.field]
     if get_tables(code, year) is None:
         return (None, -1.0, None)
     best = (None, -1.0, None)
@@ -89,7 +98,7 @@ def pick_mother(code: str, year: int, golden_rb: Dict,
             continue
         try:
             rb = version_parse_fn(c["path"])(code, year)
-            s = score_revenue(rb, golden_rb)["score"]
+            s = score_field(spec, rb, golden_rb)["score"]
         except Exception:
             s = -1.0
         if s > best[1]:

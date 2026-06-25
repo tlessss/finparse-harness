@@ -41,7 +41,7 @@ def test_wrong_value_flagged():
     s = score_revenue(pred, _GOLD)
     assert not s["exact"]
     bad = [m for m in s["mismatches"] if m["issue"] == "值不符"]
-    assert bad and bad[0]["收入"] is not None
+    assert bad and bad[0]["金额"] is not None
 
 
 def test_tolerance_allows_rounding():
