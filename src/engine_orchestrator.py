@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 from src.parsers.selector import select_parser
-from src.eval.field_spec import REVENUE, COST, RND, EMPLOYEE
+from src.eval.field_spec import REVENUE, COST, RND, EMPLOYEE, TOP_CLIENTS, TOP_SUPPLIERS
 from src.database import find_stock, update_report_fields
 
 
@@ -95,7 +95,12 @@ class FinParseAI:
         cost_result = self._route_field(COST, stock_code, report_year, all_tables)
         if cost_result is None:
             cost_result = cost_parser.parse(pdf_path, pre_scan=all_tables)
+        # 客户/供应商(D类)：top_parser 双字段为冷启动基底，各自路由命中则覆盖
         top_result = top_parser.parse(pdf_path, pre_scan=all_tables)
+        tc_routed = self._route_field(TOP_CLIENTS, stock_code, report_year, all_tables)
+        ts_routed = self._route_field(TOP_SUPPLIERS, stock_code, report_year, all_tables)
+        client_result = tc_routed or top_result
+        supplier_result = ts_routed or top_result
 
         duration = round(time.time() - start, 2)
 
@@ -153,16 +158,20 @@ class FinParseAI:
         else:
             statuses.append("cost_missing")
 
-        if top_result.get("top_clients"):
-            output["top_clients"] = top_result["top_clients"]
-            db_fields["top_clients"] = top_result["top_clients"]
+        if client_result.get("top_clients"):
+            output["top_clients"] = client_result["top_clients"]
+            db_fields["top_clients"] = client_result["top_clients"]
+            if client_result.get("溯源"):
+                output.setdefault("溯源", {})["top_clients"] = client_result["溯源"]
             statuses.append("client_ok")
         else:
             statuses.append("client_missing")
 
-        if top_result.get("top_suppliers"):
-            output["top_suppliers"] = top_result["top_suppliers"]
-            db_fields["top_suppliers"] = top_result["top_suppliers"]
+        if supplier_result.get("top_suppliers"):
+            output["top_suppliers"] = supplier_result["top_suppliers"]
+            db_fields["top_suppliers"] = supplier_result["top_suppliers"]
+            if supplier_result.get("溯源"):
+                output.setdefault("溯源", {})["top_suppliers"] = supplier_result["溯源"]
             statuses.append("supplier_ok")
         else:
             statuses.append("supplier_missing")
