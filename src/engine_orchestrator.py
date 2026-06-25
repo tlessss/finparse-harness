@@ -137,6 +137,8 @@ class FinParseAI:
         if cost_result.get("cost_breakdown"):
             output["cost_breakdown"] = cost_result["cost_breakdown"]
             db_fields["cost_breakdown"] = cost_result["cost_breakdown"]
+            if cost_result.get("溯源"):
+                output.setdefault("溯源", {})["cost_breakdown"] = cost_result["溯源"]
             statuses.append("cost_ok")
         else:
             statuses.append("cost_missing")
