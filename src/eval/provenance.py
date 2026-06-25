@@ -11,6 +11,7 @@
 from typing import Dict, List
 
 from src.parsers.infra.table_scanner import parse_money, parse_ratio
+from src.eval.field_spec import REVENUE, as_dims
 
 
 def _norm(s) -> str:
@@ -27,16 +28,17 @@ def _rows(tables):
             yield page, grid[r], (bb[r] if r < len(bb) else [])
 
 
-def attach_provenance(rb: Dict, tables: List[Dict]) -> Dict:
-    """给一份 revenue_breakdown 反查溯源，返回 {字段路径: {page, bbox}}。"""
+def attach_provenance(value, tables: List[Dict], spec=REVENUE) -> Dict:
+    """给一份字段结果反查溯源，返回 {字段路径: {page, bbox}}。字段通用(按 spec)。"""
     prov: Dict = {}
-    for dim, rows in (rb or {}).items():
+    amount_key, ratio_key = spec.amount_key, spec.ratio_key
+    for dim, rows in as_dims(value, spec).items():
         if not isinstance(rows, list):
             continue
         for i, row in enumerate(rows):
             name = row.get("name")
-            rev = row.get("revenue_yuan")
-            rat = row.get("ratio_pct")
+            rev = row.get(amount_key)
+            rat = row.get(ratio_key)
             nn = _norm(name)
             if not nn:
                 continue
@@ -64,7 +66,7 @@ def attach_provenance(rb: Dict, tables: List[Dict]) -> Dict:
                     m = parse_money(grow[c]) if grow[c] else None
                     if m is not None and abs(m - rev) <= max(1.0, abs(rev) * 1e-6):
                         if bb(c):
-                            prov[f"{dim}[{i}].revenue_yuan"] = {"page": page, "bbox": bb(c)}
+                            prov[f"{dim}[{i}].{amount_key}"] = {"page": page, "bbox": bb(c)}
                         break
             # 3) 行内按值找占比格
             if rat is not None:
@@ -72,6 +74,6 @@ def attach_provenance(rb: Dict, tables: List[Dict]) -> Dict:
                     rr = parse_ratio(grow[c]) if (grow[c] and "%" in str(grow[c])) else None
                     if rr is not None and abs(rr - rat) <= 0.01:
                         if bb(c):
-                            prov[f"{dim}[{i}].ratio_pct"] = {"page": page, "bbox": bb(c)}
+                            prov[f"{dim}[{i}].{ratio_key}"] = {"page": page, "bbox": bb(c)}
                         break
     return prov

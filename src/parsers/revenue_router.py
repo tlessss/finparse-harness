@@ -51,7 +51,6 @@ def route_field(spec: FieldSpec, code: str, year: int,
     if get_tables(code, year) is None:
         return {"status": "needs_repair", "parser": None, "parser_key": None,
                 "result": None, "signal": None, "tried": [], "reason": "无缓存表", **base}
-
     use_index = catalog is None
     fp = fingerprint if fingerprint is not None else (fingerprint_of(code, year) if use_index else None)
 

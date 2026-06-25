@@ -97,6 +97,38 @@ def _check_revenue(rev: Dict) -> List[Dict]:
     return violations
 
 
+def _check_cost(cost) -> List[Dict]:
+    """成本：占成本比重之和 ≈ 100%（扁平列表），占比 ∈ [0,100]。"""
+    violations = []
+    if not isinstance(cost, list):
+        return violations
+    ratios = []
+    for it in cost:
+        r = it.get("ratio_pct")
+        if r is None:
+            continue
+        if r < 0 or r > 100:
+            violations.append(_violation(
+                "cost_breakdown", "ratio_range", "red",
+                f"成本构成存在非法占比 {r}%（应 ∈ [0,100]）", expected="[0,100]", actual=r))
+        else:
+            ratios.append(r)
+    if len(ratios) >= RATIO_MIN_ITEMS:
+        total = round(sum(ratios), 2)
+        if RATIO_SUM_OK[0] <= total <= RATIO_SUM_OK[1]:
+            pass
+        elif RATIO_SUM_WARN[0] <= total <= RATIO_SUM_WARN[1]:
+            violations.append(_violation(
+                "cost_breakdown", "ratio_sum", "warn",
+                f"成本构成占比之和 {total}%（轻微偏离 100%）", expected="≈100%", actual=total))
+        else:
+            violations.append(_violation(
+                "cost_breakdown", "ratio_sum", "red",
+                f"成本构成占比之和 {total}%（严重偏离，疑似漏行/合计行混入）",
+                expected="≈100%", actual=total))
+    return violations
+
+
 def _check_rnd(rnd: Dict) -> List[Dict]:
     """研发：明细 amount_this 之和 ≈ total_this。"""
     violations = []
@@ -187,6 +219,7 @@ def check_hard_rules(parse_result: Dict) -> Dict:
     """
     violations: List[Dict] = []
     violations += _check_revenue(parse_result.get("revenue_breakdown"))
+    violations += _check_cost(parse_result.get("cost_breakdown"))
     violations += _check_rnd(parse_result.get("rnd_info"))
     violations += _check_employees(parse_result.get("employees"))
 

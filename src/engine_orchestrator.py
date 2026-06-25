@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 
 from src.parsers.selector import select_parser
+from src.eval.field_spec import REVENUE, COST
 from src.database import find_stock, update_report_fields
 
 
@@ -37,23 +38,23 @@ class FinParseAI:
         cls = select_parser(field, pdf_path)
         return cls(self.rule)
 
-    def _route_revenue(self, code, year, all_tables):
-        """营收：选择即验证路由到认证专用解析器；命中返回结果，否则 None（回退冷启动）。"""
+    def _route_field(self, spec, code, year, all_tables):
+        """字段通用：选择即验证路由到认证专用解析器；命中返回结果(含自动溯源)，否则 None(回退冷启动)。"""
         if not code or not year:
             return None
         try:
             from src.eval.table_cache import put as cache_put
-            from src.parsers.revenue_router import route_revenue
+            from src.parsers.revenue_router import route_field
+            from src.eval.provenance import attach_provenance
+            # 把抽取出来的表缓存起来
             cache_put(code, year, all_tables)        # 用引擎已抽好的表，route 不重扫
-            rt = route_revenue(code, year)
+            rt = route_field(spec, code, year)
             if rt.get("status") == "routed":
-                prov = {}
                 try:
-                    from src.eval.provenance import attach_provenance
-                    prov = attach_provenance(rt["result"], all_tables)   # 事后自动溯源
+                    prov = attach_provenance(rt["result"], all_tables, spec)
                 except Exception:
                     prov = {}
-                return {"revenue_breakdown": rt["result"], "溯源": prov,
+                return {spec.field: rt["result"], "溯源": prov,
                         "_parser": rt["parser_key"], "_routed": True}
         except Exception:
             return None                              # 路由出任何问题都安全回退
@@ -79,12 +80,15 @@ class FinParseAI:
         top_parser = self._get_parser("top_clients", pdf_path)
 
         # 营收：先选择即验证路由到认证专用解析器；没命中再用通用解析器冷启动
-        rev_result = self._route_revenue(stock_code, report_year, all_tables)
+        rev_result = self._route_field(REVENUE, stock_code, report_year, all_tables)
         if rev_result is None:
             rev_result = rev_parser.parse(pdf_path, pre_scan=all_tables)
         rnd_result = rnd_parser.parse(pdf_path, pre_scan=all_tables)
         emp_result = emp_parser.parse(pdf_path, pre_scan=all_tables)
-        cost_result = cost_parser.parse(pdf_path, pre_scan=all_tables)
+        # 成本：同样路由优先 + 通用解析器冷启动兜底
+        cost_result = self._route_field(COST, stock_code, report_year, all_tables)
+        if cost_result is None:
+            cost_result = cost_parser.parse(pdf_path, pre_scan=all_tables)
         top_result = top_parser.parse(pdf_path, pre_scan=all_tables)
 
         duration = round(time.time() - start, 2)
