@@ -22,11 +22,31 @@ class FieldSpec:
     ratio_key: str = "ratio_pct"
     cls: str = "A"                   # 判据类：A 占比构成
     label: str = ""
+    # ── 准则口径（规范驱动，喂给生成 prompt / 认表认列 / 校验）──
+    spec_note: str = ""              # 准则要点
+    categories: tuple = ()           # 标准类目白名单
+    table_markers: tuple = ()        # 认表的表头/语义白名单
+    section_anchors: tuple = ()      # 章节定位锚点
 
 
-REVENUE = FieldSpec("revenue_breakdown", "revenue_yuan",
-                    ("industries", "segments", "regions", "by_channel"), label="营收")
-COST = FieldSpec("cost_breakdown", "amount_yuan", (), label="成本")   # 扁平列表
+# 依据《公开发行证券的公司信息披露内容与格式准则第2号(2025版)》，见 docs/规范要点-解析映射.md
+REVENUE = FieldSpec(
+    "revenue_breakdown", "revenue_yuan",
+    ("industries", "segments", "regions", "by_channel"), label="营收",
+    spec_note=("准则第二十五条：按行业/产品/地区/销售模式披露营业收入构成。"
+               "目标是(A)占营业收入比重表(金额+占比)，不是(B)收入/成本/毛利率表。"
+               "若表头只有毛利率而无占比列 → 占比置空，严禁把毛利率当占比(徐工踩坑根因)。"),
+    categories=("分行业", "分产品", "分地区", "分销售模式"),
+    table_markers=("占营业收入比重", "营业收入比重", "占比"),
+    section_anchors=("主要经营情况", "收入与成本"))
+
+COST = FieldSpec(
+    "cost_breakdown", "amount_yuan", (), label="成本",
+    spec_note=("准则第二十五条：披露营业成本主要构成项目(按性质)占成本总额比重。"
+               "目标是占营业成本比重表；各项占比之和≈100%。"),
+    categories=("原材料", "人工", "职工薪酬", "折旧", "能源", "动力", "制造费用"),
+    table_markers=("占营业成本比重", "营业成本构成", "成本构成"),
+    section_anchors=("收入与成本", "主要经营情况"))
 
 FIELDS: Dict[str, FieldSpec] = {f.field: f for f in (REVENUE, COST)}
 

@@ -20,30 +20,49 @@ from src.agents.llm_client import chat
 from src.eval.table_cache import get_tables
 from src.eval.sandbox_exec import version_parse_fn
 from src.eval.run_eval import eval_version, accept_candidate
+from src.eval.field_spec import REVENUE
 from src.parsers.infra.table_scanner import filter_by_signature
 
-_CONTRACT = '''你要写一个 A 股年报"营收分项"专用解析器。严格实现契约：
-
-def parse(tables, context=None) -> dict:
-    # tables: 列表，每项 = {"page":页码, "table":二维数组(每格是字符串或None),
-    #                      "text":整表文字, "section":章节, "cell_bbox":..., "table_bbox":...}
-    # 返回: {"industries":[{"name":str,"revenue_yuan":float,"ratio_pct":float}, ...],
-    #        "segments":[...], "regions":[...]}   # 只填能确定的维度
-    ...
-
-要点（很重要）：
-- 营收分项表里，行用"分行业/分产品/分地区"标记切桶(industries/segments/regions)。
-- **陷阱**：常有两张像的表——①毛利率表(列是营业收入/营业成本/毛利率)②占比构成表(列是金额/占营业收入比重)。
-  你要的是②。判别法：在某个维度桶内，占比列的各行%求和≈100；毛利率列求和远不到100；"同比增减"列正负混合也不到100。
-  取"桶内%求和≈100 的最左列"当占比列；金额列=占比列左侧最近的大额数字列。
-- 取当年(最左)那一组金额/占比，不要去年。跳过合计/小计行。
-- 可用工具(可 import)：from src.parsers.infra.table_scanner import parse_money, parse_ratio, is_total_row
-- 只输出 Python 代码，不要解释。'''
+# 字段 → filter_by_signature 的信号类型
+_SIG_TYPE = {"revenue_breakdown": "revenue", "cost_breakdown": "cost",
+             "rnd_info": "rnd", "employees": "employee",
+             "top_clients": "supplier", "top_suppliers": "supplier"}
 
 
-def _render_candidates(tables, n=3) -> str:
-    ranked = filter_by_signature(tables, "revenue")[:n]
-    out = [f"营收候选表 {len(ranked)} 张（仅供你了解结构，运行时你拿到的是全部 tables）："]
+def _shape_str(spec) -> str:
+    row = '{"name":str,"%s":float,"ratio_pct":float}' % spec.amount_key
+    if spec.dims:
+        return '{"%s":[%s, ...], ...}  # 维度键: %s' % (spec.dims[0], row, "/".join(spec.dims))
+    return '[%s, ...]  # 扁平列表' % row
+
+
+def _build_contract(spec) -> str:
+    """规范驱动的生成契约：注入该字段的准则口径(类目/表特征/章节/校验)。"""
+    bucket = (f"按 {'/'.join(spec.categories)} 标记切桶" if spec.dims else "扁平列表(无需切桶)")
+    marker = spec.table_markers[0] if spec.table_markers else "占比"
+    return f'''你要写一个 A 股年报"{spec.label}"专用解析器。严格实现契约：
+
+def parse(tables, context=None):
+    # tables: 列表,每项={{"page","table"(二维数组,每格字符串或None),"text","section","cell_bbox"}}
+    # 返回: {_shape_str(spec)}
+
+准则口径(《公开发行证券的公司信息披露内容与格式准则第2号》)：
+  {spec.spec_note}
+  标准类目(白名单): {'/'.join(spec.categories) or '(扁平,无固定类目)'}
+  目标表特征(表头/语义含其一): {'/'.join(spec.table_markers)}
+  所在章节: {'/'.join(spec.section_anchors)}
+
+要点：
+- {bucket}。占比列必须由"{marker}"类表头/语义命中——准则口径优先,别只靠字面。
+- 判别占比列：在(维度桶内)占比列各行 % 求和≈100(避开毛利率/同比列)；无占比列则置空,严禁拿毛利率顶替。
+- 金额列=占比列左侧最近的大额数字列；取当年(最左)那组；跳过合计/小计行。
+- 可 import: from src.parsers.infra.table_scanner import parse_money, parse_ratio, is_total_row
+- 只输出 Python 代码,不要解释。'''
+
+
+def _render_candidates(tables, spec, n=3) -> str:
+    ranked = filter_by_signature(tables, _SIG_TYPE.get(spec.field, "revenue"))[:n]
+    out = [f"{spec.label}候选表 {len(ranked)} 张（仅供了解结构，运行时你拿到的是全部 tables）："]
     for i, c in enumerate(ranked):
         out.append(f"\n候选{i} 页{c['page']}:")
         for row in c["table"][:14]:
@@ -56,28 +75,35 @@ def _extract_code(raw: str) -> str:
     return (m.group(1) if m else raw).strip()
 
 
-def _feedback(rep: Dict, out_rb: Dict) -> str:
+def _feedback(rep: Dict, out_rb, spec=None) -> str:
     """有诊断性的负反馈（给结构知识，不泄露 golden 真值）。"""
-    n_out = sum(len(v) for v in (out_rb or {}).values())
+    spec = spec or REVENUE
+    n_out = (sum(len(v) for v in out_rb.values()) if isinstance(out_rb, dict)
+             else len(out_rb or []))
+    marker = spec.table_markers[0] if spec.table_markers else "占比"
     lines = [f"你的解析器得分 {rep['score']}（需无漏行/错值才通过）。"]
     if rep.get("error"):
         lines.append(f"运行报错：{rep['error']}")
-    elif n_out == 0:
+    elif n_out == 0 and spec.dims:        # 多维字段(营收)的空输出诊断
         lines.append(
             "你的输出**完全为空**，八成是选表失败。最常见的坑："
-            "❶ 不要用『整列%求和≈100』判占比列！营收构成表里同一列把 "
-            "分行业(~100)+分产品(~100)+分地区(~100) 叠成 ~300，落不进 [95,105]，于是你一张表都没选中。"
-            "正确做法：先按『分行业/分产品/分地区』标记把数据行切成维度桶，再**在每个桶内**对%求和≈100 来认占比列。"
-            "❷ 注意 is_total_row 的参数是『行名字符串』不是整行列表。"
-            "❸ 选表时取『桶内%求和最接近100』的列(用最小偏差,不是最大)。")
+            "❶ 不要用『整列%求和≈100』判占比列！构成表里同一列把多个维度(各~100)叠成 ~200/300，"
+            "落不进 [95,105]，于是一张表都没选中。正确做法：先按维度标记把行切桶，再**在每个桶内**对%求和≈100。"
+            "❷ is_total_row 的参数是『行名字符串』不是整行列表。"
+            "❸ 选表取『桶内%求和最接近100』的列。")
+    elif n_out == 0:                       # 扁平字段(成本等)的空输出诊断
+        lines.append(
+            f"你的输出**完全为空**，八成是选表/认列失败。注意：占比列要由『{marker}』类表头命中；"
+            "各行%求和≈100；金额列在占比列左侧；is_total_row 传行名字符串。")
     else:
         probs = "; ".join(f"[{m.get('dim')}]{m.get('name')}:{m.get('issue')}"
                           for m in (rep.get("mismatches") or [])[:8])
         lines.append(f"问题：{probs}。")
-        # 整维度漏失的诊断（通用结构知识）
-        miss = [d for d in ("industries", "segments", "regions")
-                if not (out_rb or {}).get(d)
-                and any(m.get("dim") == d for m in (rep.get("mismatches") or []))]
+        # 整维度漏失的诊断（仅多维字段，如营收）
+        miss = ([d for d in spec.dims
+                 if isinstance(out_rb, dict) and not out_rb.get(d)
+                 and any(m.get("dim") == d for m in (rep.get("mismatches") or []))]
+                if spec.dims else [])
         if "industries" in miss:
             lines.append(
                 "你**完全漏了 industries 维度**。常见原因：该维度的标记被吸收/缺失——"
@@ -93,24 +119,28 @@ def _feedback(rep: Dict, out_rb: Dict) -> str:
 
 def generate_parser(code: str, year: int, golden_entry: Dict,
                     base_fn: Callable, out_path: str,
-                    max_rounds: int = 8, mother_path: str = None, log=print) -> Dict:
+                    max_rounds: int = 8, mother_path: str = None,
+                    spec=None, log=print) -> Dict:
     """终点=完全正确(exact)。没到 exact 就继续想办法；到上限仍不 exact → 转人工。
-    绝不在半成品(部分正确)上停下。base_fn 仅作安全护栏(不退步)，不是 stop 条件。
-    mother_path 给定则 fork 模式：在母本源码基础上改（弱模型更易到 exact）。"""
+    绝不在半成品上停下。base_fn 仅作安全护栏(不退步)。mother_path 给定则 fork 模式。
+    spec 决定字段(默认营收) + 注入准则口径(规范驱动)。"""
+    spec = spec or REVENUE
     tables = get_tables(code, year)
     if tables is None:
         return {"accepted": False, "error": "无缓存表"}
 
-    failure = ("v0(现有解析器)在这份上得分 0：它选错了表(把毛利率当占比)、"
-               "且分项漏行。请写一个能正确选占比构成表、认对列、提全所有分项的解析器。")
+    failure = (f"现有解析器在这份的{spec.label}上失败。请按上面准则口径，"
+               f"正确选目标表、认对列、提全所有分项。")
+    contract = _build_contract(spec)
+    cand = _render_candidates(tables, spec)
     if mother_path:
         with open(mother_path, encoding="utf-8") as f:
             mother_src = f.read()
-        first = (f"{_CONTRACT}\n\n股票 {code} {year}。\n{_render_candidates(tables)}\n\n{failure}\n\n"
+        first = (f"{contract}\n\n股票 {code} {year}。\n{cand}\n\n{failure}\n\n"
                  f"下面是一个**相似版式的已认证解析器(母本)**，请**在它基础上改(fork)**来适配本报告，"
                  f"尽量复用对的部分、只改差异处：\n```python\n{mother_src}\n```")
     else:
-        first = f"{_CONTRACT}\n\n股票 {code} {year}。\n{_render_candidates(tables)}\n\n{failure}"
+        first = f"{contract}\n\n股票 {code} {year}。\n{cand}\n\n{failure}"
     messages = [
         {"role": "system", "content": "你是资深 Python 工程师，精通解析中文财报表格。"},
         {"role": "user", "content": first},
@@ -125,8 +155,8 @@ def generate_parser(code: str, year: int, golden_entry: Dict,
         try:
             v1_fn = version_parse_fn(out_path)
             out_rb = v1_fn(code, year)
-            ev = eval_version(v1_fn, [golden_entry])
-            safety = accept_candidate(base_fn, v1_fn, [golden_entry])  # 仅护栏：是否比v0退步
+            ev = eval_version(v1_fn, [golden_entry], spec)
+            safety = accept_candidate(base_fn, v1_fn, [golden_entry], spec)  # 仅护栏：是否比v0退步
         except Exception as e:
             import traceback as _tb
             frames = _tb.format_exc().strip().splitlines()
@@ -149,7 +179,7 @@ def generate_parser(code: str, year: int, golden_entry: Dict,
 
         # 没全对 → 继续想办法（把还差哪喂回去）
         messages += [{"role": "assistant", "content": raw},
-                     {"role": "user", "content": _feedback(rep, out_rb)}]
+                     {"role": "user", "content": _feedback(rep, out_rb, spec)}]
 
     # 想尽 max_rounds 仍没到 exact → 不留半成品，转人工
     return {"accepted": False, "escalate": "human", "rounds": max_rounds,
@@ -157,15 +187,14 @@ def generate_parser(code: str, year: int, golden_entry: Dict,
 
 
 def repair(code: str, year: int, golden_entry: Dict, base_fn: Callable,
-           out_path: str, catalog=None, fork_lo: float = 0.3, log=print) -> Dict:
+           out_path: str, catalog=None, fork_lo: float = 0.3, spec=None, log=print) -> Dict:
     """
-    三岔修复决策（fork 优先）：先用选择即验证挑最像的已认证母本，据分定路：
-      母本 exact     → 复用(直接用,不调LLM)
-      母本部分(≥lo)  → fork(在母本源码上改)
-      都很差         → 新建(从零写)
+    三岔修复决策（fork 优先，字段通用按 spec）：先用选择即验证挑最像的已认证母本，据分定路：
+      母本 exact → 复用(不调LLM)；母本部分(≥lo) → fork；都很差 → 新建。
     """
+    spec = spec or REVENUE
     from src.eval.parser_catalog import pick_mother
-    mpath, mscore, mkey = pick_mother(code, year, golden_entry["revenue_breakdown"], catalog)
+    mpath, mscore, mkey = pick_mother(code, year, golden_entry[spec.field], catalog, spec)
 
     if mscore >= 0.999:
         log(f"🔁 复用：已认证母本『{mkey}』对本报告 exact → 直接用，无需生成 LLM")
@@ -173,9 +202,10 @@ def repair(code: str, year: int, golden_entry: Dict, base_fn: Callable,
 
     if mpath and mscore >= fork_lo:
         log(f"🍴 fork：最像母本『{mkey}』(分{mscore}) → 在它基础上改")
-        r = generate_parser(code, year, golden_entry, base_fn, out_path, mother_path=mpath, log=log)
+        r = generate_parser(code, year, golden_entry, base_fn, out_path,
+                            mother_path=mpath, spec=spec, log=log)
     else:
         log(f"🆕 新建：无合适母本(最高分{mscore}) → 从零写")
-        r = generate_parser(code, year, golden_entry, base_fn, out_path, log=log)
+        r = generate_parser(code, year, golden_entry, base_fn, out_path, spec=spec, log=log)
     r["action"] = "fork" if (mpath and mscore >= fork_lo) else "new"
     return r
