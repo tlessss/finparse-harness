@@ -198,9 +198,11 @@ def certify_parser(code: str, year: int, code_src: str, key: str = None) -> Dict
         return {"error": "未到 exact，不能认证（正确率优先）",
                 "score": res.get("score"), "mismatches": res.get("mismatches")}
     from src.eval.parser_catalog import certify
+    from src.eval.route_index import fingerprint_of
     path = f"src/parsers/versions/rev_{code}_{year}.py"
     with open(path, "w", encoding="utf-8") as f:
         f.write(code_src)
     key = key or f"{code}-{year}-人工认证"
-    certify(key, path)                          # 入目录 → 下次同版式自动路由
-    return {"certified": True, "parser_key": key, "path": path, "score": 1.0}
+    fp = fingerprint_of(code, year)             # 记录版式指纹 → 缩候选索引
+    certify(key, path, fingerprints=[fp] if fp else None)
+    return {"certified": True, "parser_key": key, "path": path, "score": 1.0, "fingerprint": fp}

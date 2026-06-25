@@ -12,9 +12,12 @@
 
 from typing import Dict, List, Optional
 
+import os
+
 from src.eval.table_cache import get_tables
 from src.eval.sandbox_exec import version_parse_fn
-from src.eval.parser_catalog import load_certified
+from src.eval.parser_catalog import candidates_for, tag_fingerprint
+from src.eval.route_index import fingerprint_of, route_get, route_set, route_invalidate
 
 _DIMS = ("industries", "segments", "regions", "by_channel")
 
@@ -36,23 +39,38 @@ def revenue_plausibility(rb: Optional[Dict]) -> Dict:
 
 
 def route_revenue(code: str, year: int,
-                  catalog: List[Dict] = None, fingerprint: str = "") -> Dict:
+                  catalog: List[Dict] = None, fingerprint: str = None) -> Dict:
     """
-    选择即验证路由。返回:
-      {"status": "routed"|"needs_repair",
-       "parser": path|None, "parser_key": key|None,
-       "result": revenue_breakdown|None, "signal": {...}, "tried": [(key, clean), ...]}
+    选择即验证路由（带指纹缩候选 + 缓存路由）。返回:
+      {"status": "routed"|"needs_repair", "parser", "parser_key",
+       "result", "signal", "tried", "fingerprint", "cache_hit", "candidates"}
+    传 catalog 时走纯候选(测试用)，不碰缓存/指纹索引。
     """
-    catalog = catalog if catalog is not None else load_certified()
     if get_tables(code, year) is None:
         return {"status": "needs_repair", "parser": None, "parser_key": None,
                 "result": None, "signal": None, "tried": [], "reason": "无缓存表"}
 
-    # 指纹缩候选（可选预筛；现 1 个认证解析器，全跑）
-    cands = catalog  # TODO: 用 fingerprint 过滤 catalog
+    use_index = catalog is None
+    fp = fingerprint if fingerprint is not None else (fingerprint_of(code, year) if use_index else None)
 
-    best = None
-    tried = []
+    # ① 缓存命中：直接跑那一个，硬规则守门（漂移则失效重选）
+    if use_index and fp:
+        cached = route_get(fp)
+        if cached and os.path.exists(cached):
+            try:
+                rb = version_parse_fn(cached)(code, year)
+                sig = revenue_plausibility(rb)
+            except Exception:
+                rb, sig = None, {"clean": False}
+            if sig.get("clean"):
+                return {"status": "routed", "parser": cached, "parser_key": "(缓存路由)",
+                        "result": rb, "signal": sig, "tried": [], "fingerprint": fp,
+                        "cache_hit": True, "candidates": 1}
+            route_invalidate(fp)
+
+    # ② 指纹缩候选 → 跑验证选优
+    cands = candidates_for(fp, catalog)
+    best, tried = None, []
     for c in cands:
         try:
             rb = version_parse_fn(c["path"])(code, year)
@@ -60,15 +78,19 @@ def route_revenue(code: str, year: int,
         except Exception:
             rb, sig = None, {"clean": False, "ratio_ok_dims": 0, "n_dims": 0, "rows": 0}
         tried.append((c["key"], sig["clean"]))
-        # 排序键：干净优先 → 占比达标维度多 → 行多
         key = (sig["clean"], sig["ratio_ok_dims"], sig["rows"])
         if best is None or key > best[0]:
             best = (key, c, rb, sig)
 
     if best and best[3]["clean"]:
         _, c, rb, sig = best
+        if use_index and fp:                       # 缓存路由 + 自学指纹
+            route_set(fp, c["path"])
+            tag_fingerprint(c["path"], fp)
         return {"status": "routed", "parser": c["path"], "parser_key": c["key"],
-                "result": rb, "signal": sig, "tried": tried}
+                "result": rb, "signal": sig, "tried": tried, "fingerprint": fp,
+                "cache_hit": False, "candidates": len(cands)}
     return {"status": "needs_repair", "parser": None, "parser_key": None,
             "result": None, "signal": (best[3] if best else None), "tried": tried,
+            "fingerprint": fp, "candidates": len(cands),
             "reason": "无认证解析器硬规则达标 → 冷启动/生成"}

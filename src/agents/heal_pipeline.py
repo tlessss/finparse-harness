@@ -49,7 +49,10 @@ def heal_revenue(code: str, year: int, golden_entry: Optional[Dict] = None,
             return {**base, "action": "reuse", "parser_key": None,
                     "score": r.get("score"), "rounds": 0, "status": "ok"}
         key = f"{code}-{year}-认证"
-        certify(key, r.get("parser") or out_path)   # 登记入目录 → 下次同版式自动路由
+        from src.eval.route_index import fingerprint_of
+        fp = fingerprint_of(code, year)
+        certify(key, r.get("parser") or out_path,   # 登记入目录 → 下次同版式自动路由
+                fingerprints=[fp] if fp else None)
         log(f"  {code}: 🎓 {r.get('action')} 到 exact → 认证入目录")
         return {**base, "action": r.get("action"), "parser_key": key,
                 "score": r.get("score"), "rounds": r.get("rounds", 0),

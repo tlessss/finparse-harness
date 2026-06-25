@@ -22,7 +22,7 @@ def test_repair_exact_certifies(monkeypatch):
     monkeypatch.setattr(hp, "repair", lambda *a, **k: {
         "accepted": True, "action": "new", "parser": "p.py", "score": 1.0, "rounds": 2})
     seen = []
-    monkeypatch.setattr(hp, "certify", lambda key, path: seen.append((key, path)))
+    monkeypatch.setattr(hp, "certify", lambda key, path, fingerprints=None: seen.append((key, path)))
     r = hp.heal_revenue("X", 2025, golden_entry={"revenue_breakdown": {}})
     assert r["status"] == "certified" and r["action"] == "new"
     assert seen and seen[0][1] == "p.py"        # 认证入目录被调用

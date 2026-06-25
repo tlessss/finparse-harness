@@ -10,7 +10,7 @@
 
 import json
 import os
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 from src.eval.table_cache import get_tables
 from src.eval.sandbox_exec import version_parse_fn
@@ -33,14 +33,44 @@ def load_certified() -> List[Dict]:
     return list(_SEED)
 
 
-def certify(key: str, path: str) -> None:
-    """把一个已 exact 的解析器登记进认证清单（去重）。下次同版式自动路由到它。"""
-    cur = load_certified()
-    if any(c["path"] == path for c in cur):
-        return
-    cur.append({"key": key, "path": path})
-    json.dump({"parsers": cur}, open(_MANIFEST, "w", encoding="utf-8"),
+def _save_manifest(parsers: List[Dict]) -> None:
+    json.dump({"parsers": parsers}, open(_MANIFEST, "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
+
+
+def certify(key: str, path: str, fingerprints: Optional[List[str]] = None) -> None:
+    """登记一个已 exact 的解析器（去重；记录它认证时的版式指纹，供缩候选）。"""
+    cur = load_certified()
+    fps = [f for f in (fingerprints or []) if f]
+    for c in cur:
+        if c["path"] == path:                      # 已在 → 并入指纹
+            c["fingerprints"] = sorted(set(c.get("fingerprints", [])) | set(fps))
+            _save_manifest(cur)
+            return
+    cur.append({"key": key, "path": path, "fingerprints": sorted(set(fps))})
+    _save_manifest(cur)
+
+
+def tag_fingerprint(path: str, fp: str) -> None:
+    """给某认证解析器补一个它能处理的指纹（成功路由后自学，让索引越来越准）。"""
+    if not fp:
+        return
+    cur = load_certified()
+    for c in cur:
+        if c["path"] == path and fp not in c.get("fingerprints", []):
+            c["fingerprints"] = sorted(set(c.get("fingerprints", [])) | {fp})
+            _save_manifest(cur)
+            return
+
+
+def candidates_for(fingerprint: str, catalog: Optional[List[Dict]] = None) -> List[Dict]:
+    """指纹缩候选（召回导向）：有指纹匹配就缩到那几个；没匹配/指纹未知 → 全跑兜底(别漏对的)。"""
+    catalog = catalog if catalog is not None else load_certified()
+    if fingerprint:
+        hit = [c for c in catalog if fingerprint in (c.get("fingerprints") or [])]
+        if hit:
+            return hit
+    return catalog
 
 
 # 向后兼容：模块级常量（首次 import 时加载/初始化）
