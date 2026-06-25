@@ -33,3 +33,34 @@ def test_cost_plausibility_dirty():
     bad = [{"name": "A", "amount_yuan": 1, "ratio_pct": 60},
            {"name": "B", "amount_yuan": 1, "ratio_pct": 20}]  # 和80
     assert field_plausibility(COST, bad)["clean"] is False
+
+
+# ── B类(研发：明细和≈合计) ──
+from src.eval.field_spec import RND
+
+_RND_GOLD = {"total_this": 1000.0, "rnd_detail": [
+    {"name": "职工薪酬", "amount_this": 600.0},
+    {"name": "研发材料", "amount_this": 400.0},
+]}
+
+
+def test_rnd_score_exact():
+    s = score_field(RND, _RND_GOLD, _RND_GOLD)
+    assert s["exact"] is True and s["score"] == 1.0
+
+
+def test_rnd_wrong_total_flagged():
+    bad = {"total_this": 1500.0, "rnd_detail": _RND_GOLD["rnd_detail"]}   # 明显偏离
+    s = score_field(RND, bad, _RND_GOLD)
+    assert not s["exact"]
+    assert any(m.get("issue") == "合计不符" for m in s["mismatches"])
+
+
+def test_rnd_plausibility_sum_eq_total():
+    assert field_plausibility(RND, _RND_GOLD)["clean"] is True
+
+
+def test_rnd_plausibility_dirty():
+    bad = {"total_this": 1000.0, "rnd_detail": [
+        {"name": "A", "amount_this": 600.0}, {"name": "B", "amount_this": 100.0}]}  # 和700≠1000
+    assert field_plausibility(RND, bad)["clean"] is False

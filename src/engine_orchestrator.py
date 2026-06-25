@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 from src.parsers.selector import select_parser
-from src.eval.field_spec import REVENUE, COST
+from src.eval.field_spec import REVENUE, COST, RND
 from src.database import find_stock, update_report_fields
 
 
@@ -83,7 +83,10 @@ class FinParseAI:
         rev_result = self._route_field(REVENUE, stock_code, report_year, all_tables)
         if rev_result is None:
             rev_result = rev_parser.parse(pdf_path, pre_scan=all_tables)
-        rnd_result = rnd_parser.parse(pdf_path, pre_scan=all_tables)
+        # 研发：路由优先(B类:明细和≈合计) + 通用解析器冷启动兜底
+        rnd_result = self._route_field(RND, stock_code, report_year, all_tables)
+        if rnd_result is None:
+            rnd_result = rnd_parser.parse(pdf_path, pre_scan=all_tables)
         emp_result = emp_parser.parse(pdf_path, pre_scan=all_tables)
         # 成本：同样路由优先 + 通用解析器冷启动兜底
         cost_result = self._route_field(COST, stock_code, report_year, all_tables)
@@ -123,6 +126,8 @@ class FinParseAI:
         if rnd_result.get("rnd_info"):
             output["rnd_info"] = rnd_result["rnd_info"]
             db_fields["rnd_info"] = rnd_result["rnd_info"]
+            if rnd_result.get("溯源"):
+                output.setdefault("溯源", {})["rnd_info"] = rnd_result["溯源"]
             statuses.append("rnd_ok")
         else:
             statuses.append("rnd_missing")

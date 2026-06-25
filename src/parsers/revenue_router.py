@@ -17,8 +17,22 @@ from src.eval.parser_catalog import candidates_for, tag_fingerprint
 from src.eval.route_index import fingerprint_of, route_get, route_set, route_invalidate
 
 
+def _plaus_b(spec: FieldSpec, value) -> Dict:
+    """B类(明细和≈合计)运行时信号：明细 amount 之和 ≈ 合计(±1%)。"""
+    value = value or {}
+    total = value.get(spec.total_key)
+    details = value.get(spec.detail_key) or []
+    amts = [d.get(spec.amount_key) for d in details if d.get(spec.amount_key) is not None]
+    if not (total and total > 0 and len(amts) >= 2):
+        return {"clean": False, "rows": len(details), "diff_pct": None}
+    diff_pct = abs(sum(amts) - total) / total * 100
+    return {"clean": diff_pct <= 1.0, "rows": len(details), "diff_pct": round(diff_pct, 2)}
+
+
 def field_plausibility(spec: FieldSpec, value) -> Dict:
-    """A类(占比构成)运行时硬规则信号：各维度占比和≈100。无 golden 时判"解对没"的代理。"""
+    """运行时硬规则信号(无 golden 判"解对没"的代理)。A类=各维度占比和≈100；B类=明细和≈合计。"""
+    if spec.cls == "B":
+        return _plaus_b(spec, value)
     dd = as_dims(value, spec)
     dims = [d for d in dd if dd[d]]
     if not dims:
@@ -79,7 +93,7 @@ def route_field(spec: FieldSpec, code: str, year: int,
         except Exception:
             rb, sig = None, {"clean": False, "ratio_ok_dims": 0, "n_dims": 0, "rows": 0}
         tried.append((c["key"], sig["clean"]))
-        key = (sig["clean"], sig["ratio_ok_dims"], sig["rows"])
+        key = (sig.get("clean"), sig.get("ratio_ok_dims", 0), sig.get("rows", 0))
         if best is None or key > best[0]:
             best = (key, c, rb, sig)
 

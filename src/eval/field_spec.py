@@ -20,9 +20,11 @@ class FieldSpec:
     amount_key: str                  # 金额字段名
     dims: tuple = ()                 # 多维字段的维度键；空=扁平列表
     ratio_key: str = "ratio_pct"
-    cls: str = "A"                   # 判据类：A 占比构成
+    cls: str = "A"                   # 判据类：A 占比构成 / B 明细和≈合计 / C 分项和=总数
     label: str = ""
     version_prefix: str = "ver"      # 版本解析器文件名前缀
+    total_key: str = ""              # B/C 类：合计/总数 字段名
+    detail_key: str = ""             # B 类：明细列表 字段名
     # ── 准则口径（规范驱动，喂给生成 prompt / 认表认列 / 校验）──
     spec_note: str = ""              # 准则要点
     categories: tuple = ()           # 标准类目白名单
@@ -49,7 +51,16 @@ COST = FieldSpec(
     table_markers=("占营业成本比重", "营业成本构成", "成本构成"),
     section_anchors=("收入与成本", "主要经营情况"))
 
-FIELDS: Dict[str, FieldSpec] = {f.field: f for f in (REVENUE, COST)}
+RND = FieldSpec(
+    "rnd_info", "amount_this", (), cls="B", label="研发", version_prefix="rnd",
+    total_key="total_this", detail_key="rnd_detail",
+    spec_note=("准则第二十五条·研发投入；附注研发费用科目明细。"
+               "判据(B类)：明细 amount_this 之和 ≈ 合计 total_this。"),
+    categories=("职工薪酬", "研发材料", "折旧摊销", "直接投入", "委托研发"),
+    table_markers=("研发费用", "研发投入"),
+    section_anchors=("研发投入", "研发费用"))
+
+FIELDS: Dict[str, FieldSpec] = {f.field: f for f in (REVENUE, COST, RND)}
 
 
 def get_spec(field: str) -> FieldSpec:

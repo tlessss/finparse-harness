@@ -95,8 +95,31 @@ def score_dimension(pred_rows: List[Dict], gold_rows: List[Dict],
     }
 
 
+def _score_b(spec: FieldSpec, pred, gold) -> Dict:
+    """B类(明细和≈合计)打分：比合计 + 按名称比明细金额。合计计为一项。"""
+    pred, gold = pred or {}, gold or {}
+    sd = score_dimension(pred.get(spec.detail_key), gold.get(spec.detail_key),
+                         spec.amount_key, spec.ratio_key)
+    total_ok = _amount_close(pred.get(spec.total_key), gold.get(spec.total_key))
+    mismatches = [{"dim": spec.detail_key, **m} for m in sd["mismatches"]]
+    if not total_ok:
+        mismatches.append({"dim": "total", "issue": "合计不符",
+                           "金额": {"输出": pred.get(spec.total_key), "真值": gold.get(spec.total_key)}})
+    n_items = sd["n_gold"] + 1                       # 明细项 + 合计
+    correct = sd["value_ok"] + (1 if total_ok else 0)
+    recall_value = correct / n_items if n_items else 0.0
+    precision = sd["row_precision"]
+    score = recall_value * precision
+    return {"exact": (score >= 0.999 and not mismatches), "score": round(score, 4),
+            "recall_value": round(recall_value, 4), "precision": round(precision, 4),
+            "per_dim": {spec.detail_key: sd}, "mismatches": mismatches, "evaluated_dims": 1}
+
+
 def score_field(spec: FieldSpec, pred, gold) -> Dict:
-    """字段通用打分：只评 golden 里有内容的维度。score = 均(召回×值正确率) × 均精确率。"""
+    """字段通用打分。A类(占比构成)：评 golden 有内容的维度,均(召回×值正确率)×均精确率。
+    B类(明细和≈合计)：比合计 + 明细金额。"""
+    if spec.cls == "B":
+        return _score_b(spec, pred, gold)
     pred_d, gold_d = as_dims(pred, spec), as_dims(gold, spec)
     per_dim, mismatches, recalls, precisions = {}, [], [], []
     for d, grows in gold_d.items():
