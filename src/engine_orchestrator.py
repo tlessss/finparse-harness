@@ -37,6 +37,22 @@ class FinParseAI:
         cls = select_parser(field, pdf_path)
         return cls(self.rule)
 
+    def _route_revenue(self, code, year, all_tables):
+        """营收：选择即验证路由到认证专用解析器；命中返回结果，否则 None（回退冷启动）。"""
+        if not code or not year:
+            return None
+        try:
+            from src.eval.table_cache import put as cache_put
+            from src.parsers.revenue_router import route_revenue
+            cache_put(code, year, all_tables)        # 用引擎已抽好的表，route 不重扫
+            rt = route_revenue(code, year)
+            if rt.get("status") == "routed":
+                return {"revenue_breakdown": rt["result"],
+                        "_parser": rt["parser_key"], "_routed": True}
+        except Exception:
+            return None                              # 路由出任何问题都安全回退
+        return None
+
     def run(self, pdf_path: str, stock_code: str = None, report_year: int = None,
             company_name: str = None, db_write: bool = True, pre_scan: list = None) -> Dict:
         """执行一次完整的财报解析。pre_scan 可传入已抽好的表，避免重复扫描（注册表多候选共享）。"""
@@ -49,14 +65,17 @@ class FinParseAI:
         else:
             all_tables = pre_scan
 
-        # ── 使用选择器动态选择解析器 ──
+        # ── 使用选择器动态选择解析器 ──  这里其实挺复杂。要找到一个最有可能的解析器
         rev_parser = self._get_parser("revenue_breakdown", pdf_path)
         rnd_parser = self._get_parser("rnd_info", pdf_path)
         emp_parser = self._get_parser("employees", pdf_path)
         cost_parser = self._get_parser("cost_breakdown", pdf_path)
         top_parser = self._get_parser("top_clients", pdf_path)
 
-        rev_result = rev_parser.parse(pdf_path, pre_scan=all_tables)
+        # 营收：先选择即验证路由到认证专用解析器；没命中再用通用解析器冷启动
+        rev_result = self._route_revenue(stock_code, report_year, all_tables)
+        if rev_result is None:
+            rev_result = rev_parser.parse(pdf_path, pre_scan=all_tables)
         rnd_result = rnd_parser.parse(pdf_path, pre_scan=all_tables)
         emp_result = emp_parser.parse(pdf_path, pre_scan=all_tables)
         cost_result = cost_parser.parse(pdf_path, pre_scan=all_tables)
@@ -78,9 +97,12 @@ class FinParseAI:
         db_fields = {}
         statuses = []
 
+
         if rev_result.get("revenue_breakdown"):
             output["revenue_breakdown"] = rev_result["revenue_breakdown"]
             db_fields["revenue_breakdown"] = rev_result["revenue_breakdown"]
+            output["revenue_source"] = ("routed:" + str(rev_result.get("_parser"))
+                                        if rev_result.get("_routed") else "cold_start")
             statuses.append("rev_ok")
             # 透传溯源（M1）：供人工 review / 裁判对照原文
             if rev_result.get("溯源"):

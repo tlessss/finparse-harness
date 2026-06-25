@@ -26,6 +26,13 @@ def _pdf_path(code: str, year: int):
     return str(hits[0]) if hits else None
 
 
+def put(code: str, year: int, tables) -> None:
+    """把已抽好的表写进缓存（引擎已 scan_pdf，喂进来让 route 不重扫）。"""
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    json.dump(tables, open(os.path.join(_CACHE_DIR, f"{code}_{year}.json"), "w",
+                           encoding="utf-8"), ensure_ascii=False)
+
+
 def get_tables(code: str, year: int, refresh: bool = False):
     """返回该报告的抽表结果（scan_pdf 形状）；缓存命中秒回，否则抽一次存盘。"""
     os.makedirs(_CACHE_DIR, exist_ok=True)
