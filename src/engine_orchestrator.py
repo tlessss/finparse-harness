@@ -47,7 +47,13 @@ class FinParseAI:
             cache_put(code, year, all_tables)        # 用引擎已抽好的表，route 不重扫
             rt = route_revenue(code, year)
             if rt.get("status") == "routed":
-                return {"revenue_breakdown": rt["result"],
+                prov = {}
+                try:
+                    from src.eval.provenance import attach_provenance
+                    prov = attach_provenance(rt["result"], all_tables)   # 事后自动溯源
+                except Exception:
+                    prov = {}
+                return {"revenue_breakdown": rt["result"], "溯源": prov,
                         "_parser": rt["parser_key"], "_routed": True}
         except Exception:
             return None                              # 路由出任何问题都安全回退
