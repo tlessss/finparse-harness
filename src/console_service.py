@@ -7,10 +7,15 @@
   · recode 重过闸：人改解析器代码 → 在缓存表上跑 → 对 golden 打分 → 返回 {score, exact, mismatches}
 """
 
+import base64
+import glob
 import json
 import os
 import tempfile
+from collections import Counter
 from typing import Dict, List, Optional
+
+from src.config import Config
 
 from src.parsers.revenue_router import route_revenue
 from src.eval.table_cache import get_tables
@@ -99,3 +104,68 @@ def recode(code: str, year: int, new_code: str) -> Dict:
         return {"error": f"代码运行报错: {str(e)[:200]}"}
     finally:
         os.unlink(tf.name)
+
+
+# ── 审核任务（结果 + 溯源 + 渲染页 + 解析器源码）──
+
+def _pdf_path(code: str, year: int):
+    hits = sorted(glob.glob(str(Config.PDF_CACHE_DIR / f"{code}_{year}*.pdf")))
+    return hits[0] if hits else None
+
+
+def _cached_engine_parse(code: str, year: int) -> Optional[Dict]:
+    """跑营收解析器拿 结果+溯源，缓存(用缓存表跳过慢抽表)。"""
+    cache = os.path.join("goldset", "parse_cache", f"{code}_{year}.json")
+    if os.path.exists(cache):
+        return json.load(open(cache, encoding="utf-8"))
+    pdf = _pdf_path(code, year)
+    if not pdf:
+        return None
+    from src.parsers.revenue.default import RevenueParser
+    r = RevenueParser({}).parse(pdf, pre_scan=get_tables(code, year))
+    out = {"revenue_breakdown": r.get("revenue_breakdown") or {}, "溯源": r.get("溯源") or {}}
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    json.dump(out, open(cache, "w", encoding="utf-8"), ensure_ascii=False)
+    return out
+
+
+def _render_page_b64(pdf_path: str, page_no: int):
+    """渲染 PDF 某页为 base64 PNG，并返回页面点尺寸(与 bbox 同坐标系)。"""
+    import fitz
+    doc = fitz.open(pdf_path)
+    page = doc[page_no - 1]
+    w, h = page.rect.width, page.rect.height
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+    b64 = base64.b64encode(pix.tobytes("png")).decode()
+    doc.close()
+    return f"data:image/png;base64,{b64}", w, h
+
+
+def _parser_code_for(code: str) -> str:
+    """该报告可编辑的解析器源码：优先已有版本文件，否则给个模板。"""
+    for pat in (f"rev_{code}_v1.py", f"rev_{code}_*.py"):
+        hits = sorted(glob.glob(f"src/parsers/versions/{pat}"))
+        if hits:
+            return open(hits[0], encoding="utf-8").read()
+    return ("def parse(tables, context=None):\n"
+            "    # tables: scan_pdf 形状; 返回 {industries/segments/regions: [{name,revenue_yuan,ratio_pct}]}\n"
+            "    return {}\n")
+
+
+def review_task(code: str, year: int) -> Dict:
+    rp = _cached_engine_parse(code, year)
+    if rp is None:
+        return {"error": "无 PDF/缓存"}
+    prov_all = rp["溯源"] or {}
+    pages = Counter(v["page"] for v in prov_all.values() if isinstance(v, dict) and v.get("page"))
+    page = pages.most_common(1)[0][0] if pages else 1
+    prov = {k: v for k, v in prov_all.items() if isinstance(v, dict) and v.get("page") == page}
+    pdf = _pdf_path(code, year)
+    try:
+        page_image, w, h = _render_page_b64(pdf, page)
+    except Exception as e:
+        page_image, w, h = "", 1, 1
+    return {"stock_code": code, "year": year, "page": page,
+            "page_w_pt": w, "page_h_pt": h, "page_image": page_image,
+            "parser_code": _parser_code_for(code),
+            "result": rp["revenue_breakdown"], "provenance": prov}

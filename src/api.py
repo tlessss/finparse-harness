@@ -406,6 +406,13 @@ def console_recode(req: RecodeRequest):
     return recode(req.stock_code, req.year, req.code)
 
 
+@app.get("/review/task")
+def console_review_task(stock_code: str, year: int = 2025):
+    """审核任务：结果 + 溯源(page/bbox) + 渲染页(base64) + 解析器源码。"""
+    from src.console_service import review_task
+    return review_task(stock_code, year)
+
+
 # ── 启动入口 ──
 
 if __name__ == "__main__":
