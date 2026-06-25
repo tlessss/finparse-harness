@@ -50,11 +50,15 @@ class FinParseAI:
             cache_put(code, year, all_tables)        # 用引擎已抽好的表，route 不重扫
             rt = route_field(spec, code, year)
             if rt.get("status") == "routed":
+                result = rt["result"]
+                # 解析器结果本身含 field 键(如客户:{top_clients:[...],total_ratio_pct})→ 解包出字段值
+                field_value = (result[spec.field]
+                               if isinstance(result, dict) and spec.field in result else result)
                 try:
-                    prov = attach_provenance(rt["result"], all_tables, spec)
+                    prov = attach_provenance(field_value, all_tables, spec)
                 except Exception:
                     prov = {}
-                return {spec.field: rt["result"], "溯源": prov,
+                return {spec.field: field_value, "溯源": prov,
                         "_parser": rt["parser_key"], "_routed": True}
         except Exception:
             return None                              # 路由出任何问题都安全回退
