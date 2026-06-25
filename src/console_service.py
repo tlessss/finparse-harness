@@ -169,3 +169,38 @@ def review_task(code: str, year: int) -> Dict:
             "page_w_pt": w, "page_h_pt": h, "page_image": page_image,
             "parser_code": _parser_code_for(code),
             "result": rp["revenue_breakdown"], "provenance": prov}
+
+
+# ── 人在回路写回：确认真值→golden，认证解析器→目录 ──
+
+_GOLDEN = "goldset/revenue_golden.json"
+
+
+def save_golden(code: str, year: int, revenue_breakdown: Dict,
+                status: str = "confirmed_by_human", note: str = "") -> Dict:
+    """人确认的营收结果 → 存为该报告的 golden（合并,保留其它条目）。"""
+    d = json.load(open(_GOLDEN, encoding="utf-8")) if os.path.exists(_GOLDEN) else {"entries": []}
+    entries = [e for e in d.get("entries", []) if not (e["stock_code"] == code and e["year"] == year)]
+    entries.append({"stock_code": code, "year": year, "_status": status,
+                    "_note": note, "revenue_breakdown": revenue_breakdown})
+    d["entries"] = sorted(entries, key=lambda e: (e["stock_code"], e["year"]))
+    os.makedirs(os.path.dirname(_GOLDEN) or ".", exist_ok=True)
+    json.dump(d, open(_GOLDEN, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    return {"saved": True, "stock_code": code, "year": year, "status": status}
+
+
+def certify_parser(code: str, year: int, code_src: str, key: str = None) -> Dict:
+    """认证一个解析器：服务端重验对 golden 必须 exact → 写版本文件 → 登记入目录。"""
+    res = recode(code, year, code_src)          # 重过闸（不信前端的 exact 声明）
+    if "error" in res:
+        return res
+    if not res.get("exact"):
+        return {"error": "未到 exact，不能认证（正确率优先）",
+                "score": res.get("score"), "mismatches": res.get("mismatches")}
+    from src.eval.parser_catalog import certify
+    path = f"src/parsers/versions/rev_{code}_{year}.py"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(code_src)
+    key = key or f"{code}-{year}-人工认证"
+    certify(key, path)                          # 入目录 → 下次同版式自动路由
+    return {"certified": True, "parser_key": key, "path": path, "score": 1.0}

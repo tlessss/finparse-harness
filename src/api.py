@@ -413,6 +413,27 @@ def console_review_task(stock_code: str, year: int = 2025):
     return review_task(stock_code, year)
 
 
+class GoldenRequest(BaseModel):
+    stock_code: str
+    year: int = 2025
+    revenue_breakdown: dict
+    note: str = ""
+
+
+@app.post("/review/golden")
+def console_save_golden(req: GoldenRequest):
+    """人确认的结果 → 存为 golden（认证解析器的真值依据）。"""
+    from src.console_service import save_golden
+    return save_golden(req.stock_code, req.year, req.revenue_breakdown, note=req.note)
+
+
+@app.post("/review/certify")
+def console_certify(req: RecodeRequest):
+    """人审通过的解析器 → 服务端重验 exact → 写版本文件 + 入认证目录 → 下次同版式免审。"""
+    from src.console_service import certify_parser
+    return certify_parser(req.stock_code, req.year, req.code)
+
+
 # ── 启动入口 ──
 
 if __name__ == "__main__":
