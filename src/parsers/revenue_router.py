@@ -29,10 +29,31 @@ def _plaus_b(spec: FieldSpec, value) -> Dict:
     return {"clean": diff_pct <= 1.0, "rows": len(details), "diff_pct": round(diff_pct, 2)}
 
 
+def _plaus_c(spec: FieldSpec, value) -> Dict:
+    """C类(分项和=总数)运行时信号：各维度人数之和 = 总数(±2)。"""
+    value = value or {}
+    total = value.get(spec.total_key)
+    if not (total and total > 0):
+        return {"clean": False, "ok_dims": 0, "n_dims": 0, "rows": 0}
+    ok, rows, ndims = 0, 0, 0
+    for d in spec.dims:
+        items = value.get(d) or []
+        counts = [r.get(spec.amount_key) for r in items if r.get(spec.amount_key) is not None]
+        if not counts:
+            continue
+        ndims += 1
+        rows += len(items)
+        if abs(sum(counts) - total) <= 2:
+            ok += 1
+    return {"clean": ndims >= 1 and ok == ndims, "ok_dims": ok, "n_dims": ndims, "rows": rows}
+
+
 def field_plausibility(spec: FieldSpec, value) -> Dict:
-    """运行时硬规则信号(无 golden 判"解对没"的代理)。A类=各维度占比和≈100；B类=明细和≈合计。"""
+    """运行时硬规则信号(无 golden 判"解对没"的代理)。A=占比和≈100;B=明细和≈合计;C=分项和=总数。"""
     if spec.cls == "B":
         return _plaus_b(spec, value)
+    if spec.cls == "C":
+        return _plaus_c(spec, value)
     dd = as_dims(value, spec)
     dims = [d for d in dd if dd[d]]
     if not dims:

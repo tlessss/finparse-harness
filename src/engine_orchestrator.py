@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 from src.parsers.selector import select_parser
-from src.eval.field_spec import REVENUE, COST, RND
+from src.eval.field_spec import REVENUE, COST, RND, EMPLOYEE
 from src.database import find_stock, update_report_fields
 
 
@@ -87,7 +87,10 @@ class FinParseAI:
         rnd_result = self._route_field(RND, stock_code, report_year, all_tables)
         if rnd_result is None:
             rnd_result = rnd_parser.parse(pdf_path, pre_scan=all_tables)
-        emp_result = emp_parser.parse(pdf_path, pre_scan=all_tables)
+        # 员工：路由优先(C类:分项和=总数) + 通用解析器冷启动兜底
+        emp_result = self._route_field(EMPLOYEE, stock_code, report_year, all_tables)
+        if emp_result is None:
+            emp_result = emp_parser.parse(pdf_path, pre_scan=all_tables)
         # 成本：同样路由优先 + 通用解析器冷启动兜底
         cost_result = self._route_field(COST, stock_code, report_year, all_tables)
         if cost_result is None:
@@ -135,6 +138,8 @@ class FinParseAI:
         if emp_result.get("employees"):
             output["employees"] = emp_result["employees"]
             db_fields["employees"] = emp_result["employees"]
+            if emp_result.get("溯源"):
+                output.setdefault("溯源", {})["employees"] = emp_result["溯源"]
             statuses.append("emp_ok")
         else:
             statuses.append("emp_missing")

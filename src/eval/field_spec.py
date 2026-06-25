@@ -60,7 +60,16 @@ RND = FieldSpec(
     table_markers=("研发费用", "研发投入"),
     section_anchors=("研发投入", "研发费用"))
 
-FIELDS: Dict[str, FieldSpec] = {f.field: f for f in (REVENUE, COST, RND)}
+EMPLOYEE = FieldSpec(
+    "employees", "count", ("composition", "education"), cls="C", label="员工",
+    version_prefix="emp", total_key="total",
+    spec_note=("准则第三十四条·员工情况；按专业构成/教育程度披露人数。"
+               "判据(C类)：各维度人数之和 = 在职员工总数 total。"),
+    categories=("生产人员", "销售人员", "技术人员", "财务人员", "行政人员"),
+    table_markers=("专业构成", "教育程度", "在职员工"),
+    section_anchors=("员工情况", "专业构成"))
+
+FIELDS: Dict[str, FieldSpec] = {f.field: f for f in (REVENUE, COST, RND, EMPLOYEE)}
 
 
 def get_spec(field: str) -> FieldSpec:

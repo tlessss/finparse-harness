@@ -64,3 +64,33 @@ def test_rnd_plausibility_dirty():
     bad = {"total_this": 1000.0, "rnd_detail": [
         {"name": "A", "amount_this": 600.0}, {"name": "B", "amount_this": 100.0}]}  # 和700≠1000
     assert field_plausibility(RND, bad)["clean"] is False
+
+
+# ── C类(员工：分项和=总数) ──
+from src.eval.field_spec import EMPLOYEE
+
+_EMP_GOLD = {"total": 1000, "composition": [
+    {"name": "生产人员", "count": 600}, {"name": "技术人员", "count": 400}],
+    "education": [{"name": "本科", "count": 700}, {"name": "硕士", "count": 300}]}
+
+
+def test_emp_score_exact():
+    s = score_field(EMPLOYEE, _EMP_GOLD, _EMP_GOLD)
+    assert s["exact"] is True and s["score"] == 1.0
+
+
+def test_emp_wrong_total_flagged():
+    bad = dict(_EMP_GOLD, total=2000)
+    s = score_field(EMPLOYEE, bad, _EMP_GOLD)
+    assert not s["exact"]
+    assert any(m.get("issue") == "总数不符" for m in s["mismatches"])
+
+
+def test_emp_plausibility_sum_eq_total():
+    assert field_plausibility(EMPLOYEE, _EMP_GOLD)["clean"] is True
+
+
+def test_emp_plausibility_dirty():
+    bad = {"total": 1000, "composition": [
+        {"name": "生产人员", "count": 600}, {"name": "技术人员", "count": 100}]}  # 和700≠1000
+    assert field_plausibility(EMPLOYEE, bad)["clean"] is False

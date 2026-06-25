@@ -115,11 +115,42 @@ def _score_b(spec: FieldSpec, pred, gold) -> Dict:
             "per_dim": {spec.detail_key: sd}, "mismatches": mismatches, "evaluated_dims": 1}
 
 
+def _score_c(spec: FieldSpec, pred, gold) -> Dict:
+    """C类(分项和=总数)打分：比总数 + 各维度按名称比人数。总数计为一项。"""
+    pred, gold = pred or {}, gold or {}
+    total_ok = _amount_close(pred.get(spec.total_key), gold.get(spec.total_key))
+    per_dim, mismatches, value_ok, n_gold, precisions = {}, [], 0, 0, []
+    for d in spec.dims:
+        grows = gold.get(d) or []
+        if not grows:
+            continue
+        sd = score_dimension(pred.get(d), grows, spec.amount_key, spec.ratio_key)
+        per_dim[d] = sd
+        value_ok += sd["value_ok"]
+        n_gold += sd["n_gold"]
+        precisions.append(sd["row_precision"])
+        for m in sd["mismatches"]:
+            mismatches.append({"dim": d, **m})
+    if not total_ok:
+        mismatches.append({"dim": "total", "issue": "总数不符",
+                           "金额": {"输出": pred.get(spec.total_key), "真值": gold.get(spec.total_key)}})
+    n_items = n_gold + 1                              # 各维度行 + 总数
+    correct = value_ok + (1 if total_ok else 0)
+    recall_value = correct / n_items if n_items else 0.0
+    precision = sum(precisions) / len(precisions) if precisions else 1.0
+    score = recall_value * precision
+    return {"exact": (score >= 0.999 and not mismatches), "score": round(score, 4),
+            "recall_value": round(recall_value, 4), "precision": round(precision, 4),
+            "per_dim": per_dim, "mismatches": mismatches, "evaluated_dims": len(per_dim)}
+
+
 def score_field(spec: FieldSpec, pred, gold) -> Dict:
     """字段通用打分。A类(占比构成)：评 golden 有内容的维度,均(召回×值正确率)×均精确率。
-    B类(明细和≈合计)：比合计 + 明细金额。"""
+    B类(明细和≈合计)：比合计+明细金额。C类(分项和=总数)：比总数+各维度人数。"""
     if spec.cls == "B":
         return _score_b(spec, pred, gold)
+    if spec.cls == "C":
+        return _score_c(spec, pred, gold)
     pred_d, gold_d = as_dims(pred, spec), as_dims(gold, spec)
     per_dim, mismatches, recalls, precisions = {}, [], [], []
     for d, grows in gold_d.items():
