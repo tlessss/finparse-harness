@@ -58,51 +58,57 @@ def _push_recent(state: Dict, rec: Dict) -> None:
     state["recent"] = ([rec] + state.get("recent", []))[:20]
 
 
+def _save_progress(state: Dict) -> None:
+    """写进度时**保留磁盘上的控制标志**(stopped/paused 归 control() 管)，避免覆盖。"""
+    disk = _read()
+    _write({**state, "stopped": disk.get("stopped", False),
+            "paused": disk.get("paused", False)})
+
+
 def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
               log: Callable = print) -> Dict:
-    """跑一批报告。返回最终状态(进度+分布)。起停由 control() 写的标志控制。"""
+    """跑一批报告。返回最终状态(进度+分布)。起停由 control() 写标志、本函数只读不覆盖。"""
     from src.engine_orchestrator import FinParseAI
     from src.eval.triage_queue import triage_report
     from src.eval.table_cache import get_tables
 
     eng = FinParseAI()
-    state = {"running": True, "paused": False, "stopped": False,
-             "total": len(codes), "done": 0, "skipped": 0, "errors": 0,
-             "fields_routed": 0, "by_reason": {},
+    _write({"running": False})                       # 清掉上一轮可能残留的 stopped/paused
+    state = {"running": True, "total": len(codes), "done": 0, "skipped": 0, "errors": 0,
+             "fields_with_data": 0, "by_reason": {},
              "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
              "recent": [], "current": None}
-    _write(state)
+    _save_progress(state)
 
     for code in codes:
-        st = _read()
-        if st.get("stopped"):
+        if _read().get("stopped"):                   # 控制标志只从磁盘读(control 写的)
             log(f"  批量已停止于 {state['done']}/{state['total']}")
             break
-        while st.get("paused") and not st.get("stopped"):     # 暂停 → 等到 resume/stop
+        while _read().get("paused") and not _read().get("stopped"):
             time.sleep(2)
-            st = _read()
-        if st.get("stopped"):
+        if _read().get("stopped"):
             break
         state["current"] = code
-        _write({**state, "paused": st.get("paused", False)})
+        _save_progress(state)
 
         pdf = _pdf_for(code, year)
-        if pdf is None:                                        # 没 PDF → 跳过(标记)
+        if pdf is None:                              # 没 PDF → 跳过(标记)
             state["skipped"] += 1
             _push_recent(state, {"code": code, "status": "no_pdf", "needs": []})
         else:
             try:
-                pre = get_tables(code, year)                   # 缓存表则不重扫
+                pre = get_tables(code, year)         # 缓存表则不重扫
                 out = eng.run(pdf, stock_code=code, report_year=year,
                               db_write=db_write, pre_scan=pre)
-                recs = triage_report(code, year)               # 落盘待办
+                recs = triage_report(code, year)     # 落盘待办
                 reasons = [r["reason"] for r in recs]
                 for r in reasons:
                     state["by_reason"][r] = state["by_reason"].get(r, 0) + 1
-                routed_n = sum(1 for v in (out.get("parse_flags") or {}).values() if v == "ok")
-                state["fields_routed"] += routed_n
+                # 有数据的字段数(routed 或冷启动都算)；真正 routed 的另由队列 needs_write 反映
+                n_data = sum(1 for v in (out.get("parse_flags") or {}).values() if v == "ok")
+                state["fields_with_data"] += n_data
                 _push_recent(state, {"code": code, "status": "ok",
-                                     "routed_n": routed_n, "needs": reasons})
+                                     "fields_with_data": n_data, "needs": reasons})
             except Exception as e:
                 state["errors"] += 1
                 _push_recent(state, {"code": code, "status": "error", "error": str(e)[:120]})
@@ -111,11 +117,11 @@ def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
         state["done"] += 1
         state["current"] = None
         state["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        _write(state)
+        _save_progress(state)
         log(f"  [{state['done']}/{state['total']}] {code} done")
 
     state["running"] = False
     state["current"] = None
     state["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    _write(state)
+    _save_progress(state)
     return state
