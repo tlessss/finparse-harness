@@ -434,6 +434,103 @@ def console_certify(req: RecodeRequest):
     return certify_parser(req.stock_code, req.year, req.code)
 
 
+# ── 判定层 + 分诊队列接口（前端控制台用）──
+
+class TriageScanRequest(BaseModel):
+    codes: list
+    year: int = 2025
+
+
+class TriageReviewRequest(BaseModel):
+    reason: str = "low_confidence"
+    limit: int = 20
+
+
+class JudgeRequest(BaseModel):
+    stock_code: str
+    year: int = 2025
+    field: str
+
+
+def _ensure_cached(code, year):
+    """确保该报告的表已在缓存(没有就解析一次)，否则路由/裁判没表可用。"""
+    from src.eval.table_cache import get_tables
+    if get_tables(code, year) is None:
+        try:
+            from src.console_service import _cached_engine_parse
+            _cached_engine_parse(code, year)
+        except Exception:
+            pass
+
+
+@app.get("/triage/summary")
+def triage_summary():
+    """分诊队列汇总：open 总数 + 按 reason/字段 分布。"""
+    from src.eval.triage_queue import summary
+    return summary()
+
+
+@app.get("/triage/queue")
+def triage_queue_list(reason: str = None, field: str = None):
+    """分诊待办列表（默认只列 open）。reason/field 可选筛选。"""
+    from src.eval.triage_queue import list_open
+    return {"records": list_open(reason=reason, field=field)}
+
+
+@app.post("/triage/scan")
+def triage_scan(req: TriageScanRequest):
+    """对一批报告分诊、落盘。未抽表的先解析一次缓存。"""
+    from src.eval.triage_queue import triage_report
+    out = []
+    for code in req.codes:
+        _ensure_cached(code, req.year)
+        out += triage_report(code, req.year)
+    return {"enqueued": out}
+
+
+@app.post("/triage/review")
+def triage_review(req: TriageReviewRequest):
+    """对队列里某 reason 跑 LLM 复核：ok 自动销账 / suspicious 改标（较慢）。"""
+    from src.agents.llm_judge import review_queue
+    return {"reviewed": review_queue(reason=req.reason, limit=req.limit)}
+
+
+@app.post("/review/judge")
+def review_judge(req: JudgeRequest):
+    """对某(报告,字段)跑 #2 溯源 LLM 裁判（按需触发，较慢 ~10-20s）。"""
+    from src.eval.field_spec import FIELDS, get_spec
+    from src.parsers.revenue_router import route_field
+    from src.agents.llm_judge import judge_field
+    if req.field not in FIELDS:
+        return {"verdict": "unknown", "summary": f"未知字段 {req.field}", "field": req.field}
+    _ensure_cached(req.stock_code, req.year)
+    spec = get_spec(req.field)
+    rt = route_field(spec, req.stock_code, req.year)
+    value = rt.get("result")
+    if isinstance(value, dict) and req.field in value:        # D类富结构解包
+        value = value[req.field]
+    if value is None:
+        return {"verdict": "unknown", "summary": "该字段未路由出结果，无法裁判", "field": req.field}
+    return judge_field(req.field, req.stock_code, req.year, value, spec=spec)
+
+
+@app.get("/review/signals")
+def review_signals(stock_code: str, year: int = 2025):
+    """每字段的置信度信号(#1跨表锚) + DB锚值，供审核台展示徽章。"""
+    from src.eval.field_spec import FIELDS, get_spec
+    from src.parsers.revenue_router import route_field
+    from src.eval.anchors import get_anchors
+    _ensure_cached(stock_code, year)
+    out = {}
+    for field in FIELDS:
+        rt = route_field(get_spec(field), stock_code, year)
+        sig = rt.get("signal") or {}
+        out[field] = {"status": rt.get("status"), "clean": sig.get("clean"),
+                      "confidence": sig.get("confidence"), "anchored": sig.get("anchored"),
+                      "anchor": sig.get("anchor")}
+    return {"signals": out, "anchors": get_anchors(stock_code, year)}
+
+
 # ── 启动入口 ──
 
 if __name__ == "__main__":
