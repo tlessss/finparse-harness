@@ -471,9 +471,13 @@ def triage_summary():
 
 
 @app.get("/triage/queue")
-def triage_queue_list(reason: str = None, field: str = None):
-    """分诊待办列表（默认只列 open）。reason/field 可选筛选。"""
-    from src.eval.triage_queue import list_open
+def triage_queue_list(reason: str = None, field: str = None, status: str = "open"):
+    """覆盖台账。status=open(待办,默认) | ok(可信绿) | all(全部)。reason/field 可选筛选。"""
+    from src.eval.triage_queue import list_open, list_ok, _load
+    if status == "ok":
+        return {"records": list_ok(field=field)}
+    if status == "all":
+        return {"records": _load()}
     return {"records": list_open(reason=reason, field=field)}
 
 
