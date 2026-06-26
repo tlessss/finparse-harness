@@ -531,6 +531,41 @@ def review_signals(stock_code: str, year: int = 2025):
     return {"signals": out, "anchors": get_anchors(stock_code, year)}
 
 
+# ── 批量跑批器接口 ──
+
+class BatchStartRequest(BaseModel):
+    codes: list
+    year: int = 2025
+    db_write: bool = False
+
+
+@app.post("/batch/start")
+def batch_start(req: BatchStartRequest):
+    """启动批量跑(后台线程)：遍历报告→解析→填分诊队列。已在跑则拒绝。"""
+    import threading
+    from src.batch_runner import run_batch, progress
+    cur = progress()
+    if cur.get("running"):
+        return {"error": "已有批量在跑", "progress": cur}
+    threading.Thread(target=run_batch, args=(req.codes, req.year, req.db_write),
+                     daemon=True).start()
+    return {"started": True, "total": len(req.codes)}
+
+
+@app.get("/batch/progress")
+def batch_progress():
+    """批量进度 + 分布(done/total/skipped/errors/fields_routed/by_reason/recent)。"""
+    from src.batch_runner import progress
+    return progress()
+
+
+@app.post("/batch/control/{action}")
+def batch_control(action: str):
+    """跑批起停：pause|resume|stop。"""
+    from src.batch_runner import control
+    return control(action)
+
+
 # ── 启动入口 ──
 
 if __name__ == "__main__":
