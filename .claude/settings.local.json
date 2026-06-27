@@ -1,6 +1,9 @@
 {
   "permissions": {
     "allow": [
+      "Bash",
+      "Write",
+      "Edit",
       "Skill(claude-api)",
       "Read(//Users/admin/formal/**)",
       "Bash(command -v python3)",
@@ -21,7 +24,39 @@
       "Bash(awk '{print $2, $10, $11, $12, $13}')",
       "Bash(awk '{print $2,$11,$12,$13}')",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(break)",
+      "Bash(git status *)",
+      "Bash(node -e \"console.log\\('d3:', require\\('./node_modules/d3/package.json'\\).version\\)\")",
+      "Bash(grep -E \"^\\\\.env$\")",
+      "Bash(curl -sS -m 15 -o /dev/null -w \"HTTP状态: %{http_code}\\\\nHTTPS: %{scheme}\\\\n重定向到: %{url_effective}\\\\n\" https://caibaoxia.cn)",
+      "Bash(curl -sS -m 4 http://localhost:8200/health)",
+      "Bash(curl -sS -m 5 \"http://localhost:8200/triage/summary\")",
+      "Bash(curl -sS -m 4 -o /dev/null -w \"%{http_code}\" http://localhost:3000/console)",
+      "Bash(curl -sS -m 8 \"http://localhost:8200/triage/queue\")",
+      "Bash(curl -sS -m 8 \"http://localhost:8200/triage/summary\")",
+      "Bash(curl -sS -m 280 -X POST http://localhost:8200/triage/scan -H 'Content-Type: application/json' -d '{\"codes\":[\"000425\",\"300005\",\"000333\"],\"year\":2025}')",
+      "Bash(curl -sS -m 10 \"http://localhost:8200/triage/summary\")",
+      "Bash(grep -nA8 \"def find_stock\" src/database.py)",
+      "Bash(pkill -f \"src.api\")",
+      "Bash(curl -s --retry 10 --retry-delay 1 --retry-connrefused \"http://localhost:8200/triage/summary\")",
+      "Bash(echo \"exit: $?\")",
+      "Bash(curl -s -X POST \"http://localhost:8200/triage/scan\" -H \"Content-Type: application/json\" -d '{\"codes\":[\"000425\",\"300005\",\"300009\"],\"year\":2025}' -o /dev/null -w \"scan HTTP %{http_code}\\\\n\")",
+      "Bash(curl -s \"http://localhost:8200/triage/summary\")",
+      "Bash(curl -s \"http://localhost:8200/triage/queue?status=ok\")",
+      "Bash(curl -s -o /dev/null -w \"health HTTP %{http_code}\\\\n\" http://localhost:8200/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
+      "Bash(curl -s -o /dev/null -w \"/console HTTP %{http_code}\\\\n\" http://localhost:3000/console)",
+      "Bash(echo \"exit $?\")",
+      "Bash(curl -s --retry 10 --retry-delay 1 --retry-connrefused \"http://localhost:8200/batch/candidates?limit=8\")",
+      "Bash(curl -s http://localhost:8200/batch/progress)",
+      "Bash(curl -s --retry 10 --retry-delay 1 --retry-connrefused \"http://localhost:8200/stocks/names?codes=000001,000425,300005,300009\")",
+      "Bash(curl -s \"http://localhost:8200/stocks/names?codes=000001,000425,300005,300009\")",
+      "Bash(curl -s \"http://localhost:8200/stocks/names\")",
+      "Bash(curl -s \"http://localhost:8200/batch/candidates?q=%E5%BE%90%E5%B7%A5\")",
+      "Bash(curl -s \"http://localhost:8200/batch/candidates?q=%E9%93%B6%E8%A1%8C&offset=0&limit=5\")",
+      "Bash(curl -s \"http://localhost:8200/batch/candidates?offset=24&limit=24\")"
     ]
   }
 }
