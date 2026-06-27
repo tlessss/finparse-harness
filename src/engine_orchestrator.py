@@ -96,7 +96,8 @@ class FinParseAI:
         return None                                  # status != routed(没命中) → 回退
 
     def run(self, pdf_path: str, stock_code: str = None, report_year: int = None,
-            company_name: str = None, db_write: bool = True, pre_scan: list = None) -> Dict:
+            company_name: str = None, db_write: bool = True, pre_scan: list = None,
+            on_stage=None) -> Dict:
         """
         执行一次完整的财报解析(主流程)。
 
@@ -120,23 +121,29 @@ class FinParseAI:
         top_parser = self._get_parser("top_clients", pdf_path)   # 客户+供应商共用一个解析器
 
         # ── 第 3 步：逐字段解析 ── 每个字段都"先路由、没命中再冷启动"
+        _stage = on_stage or (lambda *_: None)        # 阶段回调：上报"正在解析哪个字段"
         # 营收
+        _stage("营收")
         rev_result = self._route_field(REVENUE, stock_code, report_year, all_tables)
         if rev_result is None:
             rev_result = rev_parser.parse(pdf_path, pre_scan=all_tables)
         # 研发
+        _stage("研发")
         rnd_result = self._route_field(RND, stock_code, report_year, all_tables)
         if rnd_result is None:
             rnd_result = rnd_parser.parse(pdf_path, pre_scan=all_tables)
         # 员工
+        _stage("员工")
         emp_result = self._route_field(EMPLOYEE, stock_code, report_year, all_tables)
         if emp_result is None:
             emp_result = emp_parser.parse(pdf_path, pre_scan=all_tables)
         # 成本
+        _stage("成本")
         cost_result = self._route_field(COST, stock_code, report_year, all_tables)
         if cost_result is None:
             cost_result = cost_parser.parse(pdf_path, pre_scan=all_tables)
         # 客户/供应商：top_parser 一次解出双字段做"基底"；各自路由若命中则覆盖对应字段
+        _stage("客户/供应商")
         top_result = top_parser.parse(pdf_path, pre_scan=all_tables)
         tc_routed = self._route_field(TOP_CLIENTS, stock_code, report_year, all_tables)
         ts_routed = self._route_field(TOP_SUPPLIERS, stock_code, report_year, all_tables)

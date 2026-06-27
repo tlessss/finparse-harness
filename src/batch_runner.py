@@ -89,26 +89,32 @@ def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
         if _read().get("stopped"):
             break
         state["current"] = code
+        state["stage"] = None
         _save_progress(state)
 
         pdf = _pdf_for(code, year)
         if pdf is None:                              # 没 PDF → 跳过(标记)
             state["skipped"] += 1
-            _push_recent(state, {"code": code, "status": "no_pdf", "needs": []})
+            _push_recent(state, {"code": code, "status": "no_pdf", "fields": {}})
         else:
             try:
                 pre = get_tables(code, year)         # 缓存表则不重扫
+
+                def _stage(field):                   # 引擎每解析一个字段就回调 → 实时上报
+                    state["stage"] = field
+                    _save_progress(state)
+
                 out = eng.run(pdf, stock_code=code, report_year=year,
-                              db_write=db_write, pre_scan=pre)
-                recs = triage_report(code, year)     # 落盘待办
-                reasons = [r["reason"] for r in recs]
-                for r in reasons:
-                    state["by_reason"][r] = state["by_reason"].get(r, 0) + 1
-                # 有数据的字段数(routed 或冷启动都算)；真正 routed 的另由队列 needs_write 反映
+                              db_write=db_write, pre_scan=pre, on_stage=_stage)
+                recs = triage_report(code, year)     # 落盘台账
+                # 逐字段结果：ok(绿) / needs_write(红) / unverified(黄) / low_confidence(橙)
+                fields = {r["field"]: ("ok" if r["status"] == "ok" else r["reason"]) for r in recs}
+                for r in recs:
+                    if r["status"] == "open":        # 只把待办计进 by_reason
+                        state["by_reason"][r["reason"]] = state["by_reason"].get(r["reason"], 0) + 1
                 n_data = sum(1 for v in (out.get("parse_flags") or {}).values() if v == "ok")
                 state["fields_with_data"] += n_data
-                _push_recent(state, {"code": code, "status": "ok",
-                                     "fields_with_data": n_data, "needs": reasons})
+                _push_recent(state, {"code": code, "status": "ok", "fields": fields})
             except Exception as e:
                 state["errors"] += 1
                 _push_recent(state, {"code": code, "status": "error", "error": str(e)[:120]})
