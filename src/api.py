@@ -570,6 +570,18 @@ def batch_control(action: str):
     return control(action)
 
 
+@app.get("/batch/candidates")
+def batch_candidates(limit: int = 50, year: int = 2025):
+    """可解析的任务列表（有缓存 PDF 的报告）。前端"任务列表→开始解析"用。"""
+    import glob
+    import os
+    from src.config import Config
+    pdfs = glob.glob(str(Config.PDF_CACHE_DIR / f"*_{year}*.pdf"))
+    codes = sorted({os.path.basename(p).split("_")[0] for p in pdfs})
+    return {"candidates": [{"code": c, "year": year} for c in codes[:limit]],
+            "total_available": len(codes)}
+
+
 # ── 启动入口 ──
 
 if __name__ == "__main__":
