@@ -570,6 +570,23 @@ def batch_control(action: str):
     return control(action)
 
 
+@app.get("/stocks/names")
+def stocks_names(codes: str = None):
+    """code → 公司名 映射（前端显示名称用）。codes 逗号分隔可筛；缺省返回全部。"""
+    from src.database import get_conn
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cl = [c.strip() for c in (codes or "").split(",") if c.strip()]
+            if cl:
+                cur.execute(f"SELECT code,name FROM stocks WHERE code IN ({','.join(['%s'] * len(cl))})", cl)
+            else:
+                cur.execute("SELECT code,name FROM stocks")
+            return {"names": {r["code"]: r["name"] for r in cur.fetchall()}}
+    finally:
+        conn.close()
+
+
 @app.get("/batch/candidates")
 def batch_candidates(limit: int = 50, year: int = 2025):
     """可解析的任务列表（有缓存 PDF 的报告）。前端"任务列表→开始解析"用。"""
