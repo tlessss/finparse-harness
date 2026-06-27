@@ -588,15 +588,33 @@ def stocks_names(codes: str = None):
 
 
 @app.get("/batch/candidates")
-def batch_candidates(limit: int = 50, year: int = 2025):
-    """可解析的任务列表（有缓存 PDF 的报告）。前端"任务列表→开始解析"用。"""
+def batch_candidates(q: str = "", offset: int = 0, limit: int = 24, year: int = 2025):
+    """可解析任务列表（有缓存 PDF 的报告）。支持 q(按 code/公司名搜) + 分页(offset/limit)。"""
     import glob
     import os
     from src.config import Config
-    pdfs = glob.glob(str(Config.PDF_CACHE_DIR / f"*_{year}*.pdf"))
-    codes = sorted({os.path.basename(p).split("_")[0] for p in pdfs})
-    return {"candidates": [{"code": c, "year": year} for c in codes[:limit]],
-            "total_available": len(codes)}
+    all_codes = sorted({os.path.basename(p).split("_")[0]
+                        for p in glob.glob(str(Config.PDF_CACHE_DIR / f"*_{year}*.pdf"))})
+    names = {}
+    try:
+        from src.database import get_conn
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                if all_codes:
+                    cur.execute(f"SELECT code,name FROM stocks WHERE code IN "
+                                f"({','.join(['%s'] * len(all_codes))})", all_codes)
+                    names = {r["code"]: r["name"] for r in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception:
+        names = {}
+    ql = q.strip().lower()
+    filtered = [c for c in all_codes
+                if not ql or ql in c.lower() or ql in names.get(c, "").lower()]
+    page = filtered[offset:offset + limit]
+    return {"candidates": [{"code": c, "year": year, "name": names.get(c, "")} for c in page],
+            "total": len(filtered), "offset": offset, "limit": limit}
 
 
 # ── 启动入口 ──
