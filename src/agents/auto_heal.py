@@ -124,5 +124,12 @@ def auto_heal_field(spec, code: str, year: int, log=print) -> Dict:
         record_ok(code, year, spec.field, {"confidence": "high"})
         log(f"  {code}/{spec.label}: 🎓 LLM自愈到 exact → 认证")
         return {**base, "action": r.get("action"), "status": "certified"}
+    # 没到 exact → 删掉失败 repair 留下的孤儿文件(没认证、没用)
+    import os
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
     return {**base, "action": "escalate", "status": "needs_human",
             "reason": f"LLM写解析器未到exact(最好{r.get('best_score')})"}
