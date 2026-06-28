@@ -208,6 +208,16 @@ def check_hard_rules(parse_result: Dict) -> Dict:
     """
     对一次解析结果执行全部关键字段勾稽硬规则。
 
+    ── 入参 parse_result 的格式(引擎组装出的整份结果，只用到这几个字段，没有的会自动跳过) ──
+      {
+        "revenue_breakdown": {"segments":[{"name","revenue_yuan","ratio_pct"}],
+                              "industries":[...], "regions":[...], "by_channel":[...]},
+        "cost_breakdown":    [{"item","ratio_pct",...}, ...],          # 扁平 list
+        "rnd_info":          {"rnd_detail":[{"name","amount_this"}], "total_this": float},
+        "employees":         {"total": int,
+                              "composition":[{"type","count"}], "education":[{"type","count"}]},
+      }
+
     Returns:
         {
           "passed": bool,              # 无 red 违规 = True

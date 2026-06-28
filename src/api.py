@@ -541,19 +541,20 @@ class BatchStartRequest(BaseModel):
     codes: list
     year: int = 2025
     db_write: bool = False
+    heal: bool = False          # 完整流程：失败字段自动走 LLM 自愈(慢,测试用)
 
 
 @app.post("/batch/start")
 def batch_start(req: BatchStartRequest):
-    """启动批量跑(后台线程)：遍历报告→解析→填分诊队列。已在跑则拒绝。"""
+    """启动批量跑(后台线程)：解析→填台账；heal=True 时失败字段自动 LLM 自愈(完整生产流程)。"""
     import threading
     from src.batch_runner import run_batch, progress
     cur = progress()
     if cur.get("running"):
         return {"error": "已有批量在跑", "progress": cur}
-    threading.Thread(target=run_batch, args=(req.codes, req.year, req.db_write),
+    threading.Thread(target=run_batch, args=(req.codes, req.year, req.db_write, req.heal),
                      daemon=True).start()
-    return {"started": True, "total": len(req.codes)}
+    return {"started": True, "total": len(req.codes), "heal": req.heal}
 
 
 @app.get("/batch/progress")

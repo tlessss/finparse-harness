@@ -104,13 +104,16 @@ def detect_columns_by_header(table: List[list], aliases: Dict[str, List[str]],
     """
     表头驱动认列。
 
-    Args:
-        table: pdfplumber 还原的二维数组
-        aliases: {语义名: [表头别名...]}，来自 revenue.yaml 的 header_aliases
-        scan_rows: 视作表头的前 N 行
-
-    Returns:
-        {语义名: 数据列索引或 None}，附 "_header_cols" 调试信息
+    ── 入参格式 ──
+      table : list[list[str|None]]   一张表的二维字符串网格，如
+              [["分产品","营业收入","占营业收入比重"], ["产品A","1200","60%"], ...]
+      aliases : dict[str, list[str]]  语义名 → 该列可能的表头别名，来自 revenue.yaml，如
+              {"name":["分产品","项目"], "revenue":["营业收入","金额"],
+               "ratio":["占营业收入比重","占比"], "gross":["毛利率"]}
+      scan_rows : int   把前几行当表头来匹配别名(应对跨行表头)，默认 3
+    ── 返回 ── dict[str, int|None]  语义名 → 数据列索引(或 None=没这列)，外加
+              "_header_cols" 调试信息(每个语义列的表头落在第几列)。如
+              {"name":0, "revenue":1, "ratio":2, "gross":None, "_header_cols":{...}}
     """
     headers = _column_headers(table, scan_rows)
     result: Dict[str, Optional[int]] = {}

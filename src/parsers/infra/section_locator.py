@@ -37,6 +37,16 @@ def rank_pages(pdf_path: str,
     """
     给每页按信号打分，返回分数最高的若干页（含 ±window 续表页），1-indexed。
 
+    ── 入参格式 ──
+      pdf_path       : str           PDF 路径
+      strong         : list[str]     强信号词，如 ["占营业收入比重", "分产品"]，命中 +10/个
+      weak           : list[str]|None 弱信号词，如 ["营业收入"]，命中 +1/个（噪声词，权重低）
+      prefer_section : str|None      偏好章节标签（如 "management" MD&A），命中该章节再 +5
+      min_page       : int           跳过这页之前的页(封面/目录)，默认 1
+      top_n          : int           最终取分数最高的前 N 页
+      window         : int           每个命中页额外带上 ±window 页(续表常跨页)
+    ── 返回 ── list[int]  候选页码(从1)，升序，如 [23, 24, 25]
+
     打分：strong 命中数×10 + weak 命中数×1 + （在 prefer_section 章节 +5）。
     无任何 strong/weak 命中的页得 0 分，不入选。
     """

@@ -14,6 +14,17 @@ class TopSupplierParser(BaseParser):
         self.rule = rule
 
     def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
+        """
+        一次解出"前五大客户"和"前五大供应商"两个字段。
+
+        入参：pdf_path: str；pre_scan: list[dict]|None。
+        返回：{"top_clients": {...}|None, "top_suppliers": {...}|None, "status": ...}
+              每个字段含 items(明细:rank/name/amount/ratio)、total_amount、total_ratio_pct、
+              related_party_ratio_pct(关联方占比)。
+        做法：遍历所有表，文本里出现"客户名称+销售额"→当客户明细表抽；
+              "供应商名称+采购额"→当供应商明细表抽；"前五名客户/供应商合计"→抽汇总数。
+              (注:准则规定明细名单"鼓励非强制"，常缺失且合规，所以 items 可能为空。)
+        """
         all_tables = pre_scan if pre_scan is not None else scan_pdf(pdf_path)
         result = {"top_clients": None, "top_suppliers": None}
 

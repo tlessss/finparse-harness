@@ -1,10 +1,16 @@
 """
-通用表格扫描 + 内容特征识别工具
+通用表格扫描 + 内容特征识别工具（解析流程的"地基"）
+========================================================
 
-职责：
-  1. 扫描 PDF 提取表格
-  2. 章节上下文标记（附注 vs 管理层讨论 vs 其它）
-  3. 表格类型特征识别
+被谁用：引擎一开始调 scan_pdf() 抽全表(贵，只做一次)；signature 派解析器
+(研发/员工/成本/供应商) 调 filter_by_signature() 从全表里挑出自己要的那张。
+
+三大职责：
+  1. scan_pdf            扫 PDF 抽所有表格(用 find_tables 保留每格坐标 bbox，供溯源)
+  2. detect_page_context 给每页打"章节标签"(附注 / 管理层讨论MD&A / 其它)
+  3. filter_by_signature 按"表格特征签名"(关键词/行数/占比上限)+ 章节，挑出某类表
+  + detect_column_types  统计法认列(名称/金额/占比列)
+  + is_total_row         判断"合计/小计"行(抽数时要剔除)
 """
 
 from typing import List, Dict, Optional
@@ -81,37 +87,41 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     """
     扫描 PDF 正文页，提取所有表格，每张表附带页码、章节上下文与单元格坐标(溯源用)。
 
-    用 find_tables() 替代 extract_tables()，额外保留每格 bbox（M1 溯源基建）。
+    ── 入参 ── pdf_path: str；max_pages: int 最多扫多少页(从第16页起)。
+    ── 返回 ── list[dict]，每个元素一张表：
+        {"page": int,                          # 页码(从1)
+         "table": [[str|None, ...], ...],       # 二维字符串网格
+         "text": str,                           # 整表拼成的文本(关键词匹配用)
+         "section": str,                        # 章节标签 fuzhu/management/other
+         "cell_bbox": [[(x0,y0,x1,y1)|None]],   # 与 table 同形状的坐标(溯源用)
+         "table_bbox": (x0,y0,x1,y1)|None}
 
-    Returns:
-        [{"page": int, "table": [[str]], "text": str, "section": str,
-          "cell_bbox": [[(x0,y0,x1,y1)|None]],   # 与 table 同形状
-          "table_bbox": (x0,y0,x1,y1)|None}, ...]
+    用 find_tables() 替代 extract_tables()，就是为了多拿到 bbox 坐标(M1 溯源基建)。
     """
-    # 先扫章节上下文
+    # 先扫一遍全文，得到"每页属于哪个章节"
     page_context = detect_page_context(pdf_path)
     results = []
 
     with pdfplumber.open(pdf_path) as pdf:
         end_page = min(15 + max_pages, len(pdf.pages))
-        for page_num in range(15, end_page):
+        for page_num in range(15, end_page):          # 跳过前15页(封面/目录)，从正文扫
             page = pdf.pages[page_num]
             pn = page_num + 1
             section = page_context.get(pn, SECTION_OTHER)
 
-            for tbl in page.find_tables():
+            for tbl in page.find_tables():            # 这一页上的每张表
                 try:
-                    grid = tbl.extract()
+                    grid = tbl.extract()              # 二维字符串网格
                 except Exception:
                     continue
                 if not grid:
                     continue
-                # 与 grid 同形状的坐标网格
+                # 构造与 grid 同形状的坐标网格(每格一个 bbox 或 None)
                 cell_bbox = []
                 for row in tbl.rows:
                     cells = getattr(row, "cells", None) or []
                     cell_bbox.append([tuple(c) if c else None for c in cells])
-                cell_bbox = _align_bbox(grid, cell_bbox)
+                cell_bbox = _align_bbox(grid, cell_bbox)   # 补齐成和 grid 完全同形状
 
                 text = " ".join(c.replace("\n", " ") for row in grid for c in row if c)
                 results.append({
@@ -184,15 +194,17 @@ TABLE_SIGNATURES = {
 def filter_by_signature(tables: List[Dict], sig_type: str,
                         enforce_section: bool = True) -> list:
     """
-    根据表格类型特征 + 章节上下文筛选表格。
+    从全量表里挑出某一类表(signature 派解析器用)：按"特征签名"+章节打分，选高分的。
 
-    Args:
-        tables: scan_pdf 返回的全量表格列表
-        sig_type: "revenue" / "rnd" / "employee" / "cost" / "supplier"
-        enforce_section: 是否强制要求在附注章节内
+    ── 入参 ──
+      tables          : list[dict]  scan_pdf 的输出(每个含 table/text/section/page...)
+      sig_type        : str  要找哪类表 "revenue"/"rnd"/"employee"/"cost"/"supplier"
+                        (对应 TABLE_SIGNATURES 里的一套关键词/行数/占比上限规则)
+      enforce_section : bool 是否要求该表在"附注"章节内(在=加分，不在=减分)
+    ── 返回 ── list[dict]  匹配的表，按得分降序：[{"table": 二维网格, "page": int, "score": int}, ...]
 
-    Returns:
-        匹配的表格列表，按得分降序排列
+    打分要点：在对的章节 +30；命中 must_have 词 +25/个(且必须至少命中1个)；
+    命中 exclude 词 -60(像别类表)；有占比/金额列加分；占比列出现 >ratio_max 的值 -50(那列是同比不是占比)。
     """
     sig = TABLE_SIGNATURES.get(sig_type, {})
     must_have = sig.get("must_have", [])
@@ -277,10 +289,13 @@ def filter_by_signature(tables: List[Dict], sig_type: str,
 
 def detect_column_types(table: list) -> Dict:
     """
-    检测表格各列的类型。
+    统计法认列：扫一遍各列、数"有多少格像文字/金额/百分比"，据此猜各列角色。
 
-    Returns:
-        {"name_col": int, "amount_col": int, "ratio_col": int, ...}
+    ── 入参 ── table: list[list[str|None]]  一张表的二维网格
+    ── 返回 ── {"name_col": int, "amount_col": int|None, "ratio_col": int|None,
+                "col_count": int, "row_count": int}
+       占比列=有≥3个 0~100 的百分数的列；金额列=像金额最多的列；名称列=剩下中文最多的列。
+       (这是兜底法；营收解析器优先用更准的"表头驱动认列"。)
     """
     num_cols = max(len(row) for row in table) if table else 0
     if num_cols == 0:

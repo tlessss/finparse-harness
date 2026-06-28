@@ -66,7 +66,7 @@ def _save_progress(state: Dict) -> None:
 
 
 def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
-              log: Callable = print) -> Dict:
+              heal: bool = False, log: Callable = print) -> Dict:
     """跑一批报告。返回最终状态(进度+分布)。起停由 control() 写标志、本函数只读不覆盖。"""
     from src.engine_orchestrator import FinParseAI
     from src.eval.triage_queue import triage_report
@@ -109,9 +109,23 @@ def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
                 recs = triage_report(code, year)     # 落盘台账
                 # 逐字段结果：ok(绿) / needs_write(红) / unverified(黄) / low_confidence(橙)
                 fields = {r["field"]: ("ok" if r["status"] == "ok" else r["reason"]) for r in recs}
-                for r in recs:
-                    if r["status"] == "open":        # 只把待办计进 by_reason
-                        state["by_reason"][r["reason"]] = state["by_reason"].get(r["reason"], 0) + 1
+                # ── 完整流程：对不可信且有锚的字段，自动走 LLM 自愈(抽golden→写解析器→认证) ──
+                if heal:
+                    from src.agents.auto_heal import auto_heal_field
+                    from src.eval.field_spec import get_spec
+                    for r in recs:
+                        if r["status"] == "open" and r["reason"] in ("needs_write", "low_confidence"):
+                            spec = get_spec(r["field"])
+                            if not spec.anchor_key:          # 无 DB 锚(客户/供应商/员工)→救不了,跳过
+                                continue
+                            state["stage"] = f"自愈·{spec.label}"
+                            _save_progress(state)
+                            hr = auto_heal_field(spec, code, year, log=log)
+                            if hr["status"] == "certified":
+                                fields[r["field"]] = "healed"        # 自愈成功(LLM写出并认证)
+                for f, st in fields.items():
+                    if st in ("needs_write", "low_confidence", "unverified"):
+                        state["by_reason"][st] = state["by_reason"].get(st, 0) + 1
                 n_data = sum(1 for v in (out.get("parse_flags") or {}).values() if v == "ok")
                 state["fields_with_data"] += n_data
                 _push_recent(state, {"code": code, "status": "ok", "fields": fields})
