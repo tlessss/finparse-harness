@@ -400,6 +400,85 @@ def filter_by_signature(tables: List[Dict], sig_type: str,
     return [{"table": t, "page": p, "score": s} for s, t, p in scored]
 
 
+def score_breakdown(item: Dict, sig_type: str) -> Dict:
+    """选表调试用：把 filter_by_signature 的打分**逐项拆开**，并标出淘汰原因(行数门/must_have门/低分)。
+    返回 {page,caption,section,rows,total,selected,reject,components:[{label,delta,note}]}。
+    注意:为展示 near-miss，这里**不短路**(即使被门淘汰也把各项算全)，selected 才反映是否真入选。"""
+    sig = TABLE_SIGNATURES.get(sig_type, {})
+    must_have = sig.get("must_have", [])
+    exclude = sig.get("exclude", [])
+    min_rows, max_rows = sig.get("min_rows", 5), sig.get("max_rows", 40)
+    ratio_max = sig.get("ratio_max")
+    allowed = SECTION_ALLOWED.get(sig_type, [])
+    caption_markers = _CAPTION_MARKERS.get(sig_type, [])
+
+    t = item["table"]
+    text = item.get("text", "")
+    caption = item.get("caption", "")
+    section = item.get("section", SECTION_OTHER)
+    comps, score, reject = [], 0, None
+
+    cap_marker = next((m for m in caption_markers if m in caption), None)
+    if cap_marker:
+        score += 40
+        comps.append({"label": "caption命中", "delta": 40, "note": cap_marker})
+    if allowed:
+        if section in allowed:
+            score += 20
+            comps.append({"label": "章节(预期)", "delta": 20, "note": section})
+        else:
+            score -= 8
+            comps.append({"label": "章节(其它)", "delta": -8, "note": section})
+
+    rows = len(t)
+    if rows < min_rows or rows > max_rows:
+        reject = reject or f"行数门: {rows} 不在 [{min_rows},{max_rows}]"
+
+    hits = [kw for kw in must_have if kw in text]
+    if hits:
+        score += 25 * len(hits)
+        comps.append({"label": "must_have", "delta": 25 * len(hits), "note": "/".join(hits)})
+    if must_have and not hits and not cap_marker:
+        reject = reject or "must_have门: 无命中且无caption"
+
+    exc = next((kw for kw in exclude if kw in text), None)
+    if exc:
+        score -= 60
+        comps.append({"label": "排除词", "delta": -60, "note": exc})
+
+    cols = detect_column_types(t)
+    if cols["ratio_col"] is not None:
+        score += 20
+        comps.append({"label": "占比列", "delta": 20, "note": f"col{cols['ratio_col']}"})
+    if cols["amount_col"] is not None:
+        score += 15
+        comps.append({"label": "金额列", "delta": 15, "note": f"col{cols['amount_col']}"})
+
+    names = sum(1 for row in t for c in row if c and _is_text(c))
+    if names >= 5:
+        score += 10
+        comps.append({"label": "名称行≥5", "delta": 10, "note": str(names)})
+
+    if ratio_max is not None and cols["ratio_col"] is not None:
+        mx = 0.0
+        for row in t:
+            if cols["ratio_col"] < len(row):
+                v = row[cols["ratio_col"]]
+                if v and "%" in v:
+                    try:
+                        mx = max(mx, abs(float(v.replace("%", "").replace(",", "").strip())))
+                    except ValueError:
+                        pass
+        if mx > ratio_max:
+            score -= 50
+            comps.append({"label": "占比>100%(疑同比/毛利率)", "delta": -50, "note": f"max {mx:.1f}%"})
+
+    if reject is None and score < 20:
+        reject = f"低分门: {score}<20"
+    return {"page": item["page"], "caption": caption, "section": section, "rows": rows,
+            "total": score, "selected": reject is None, "reject": reject, "components": comps}
+
+
 # ── 列类型检测 ──
 
 def detect_column_types(table: list) -> Dict:

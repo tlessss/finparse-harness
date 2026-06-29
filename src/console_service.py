@@ -181,6 +181,35 @@ def review_task(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             "result": rp.get(field), "provenance": prov}
 
 
+_DBG_SIG = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd",
+            "employees": "employee", "top_clients": "supplier", "top_suppliers": "supplier"}
+_DBG_ANCHOR = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd_expense"}
+
+
+def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """选表调试台：返回该字段所有相关候选表的 得分明细 + 淘汰原因 + 预览，供人工核对选表准不准。"""
+    from src.parsers.infra.table_scanner import score_breakdown
+    from src.eval.anchors import get_anchors
+    sig = _DBG_SIG.get(field, "revenue")
+    tables = get_tables(code, year)
+    if not tables:
+        return {"error": "无 PDF/缓存（先解析一次该报告）", "candidates": []}
+    cands = []
+    for it in tables:
+        bd = score_breakdown(it, sig)
+        # 只留"相关"表(入选 / 有caption命中 / 有must_have)，滤掉完全无关的，但保留 near-miss
+        relevant = bd["selected"] or any(c["label"] in ("caption命中", "must_have") for c in bd["components"])
+        if not relevant:
+            continue
+        bd["preview"] = [[(c or "").replace("\n", " ").strip()[:14] for c in row]
+                         for row in (it["table"] or [])[:10]]
+        cands.append(bd)
+    cands.sort(key=lambda x: -x["total"])
+    anchor = (get_anchors(code, year) or {}).get(_DBG_ANCHOR.get(field))
+    return {"code": code, "year": year, "field": field, "sig": sig,
+            "anchor": anchor, "total_tables": len(tables), "candidates": cands}
+
+
 # ── 人在回路写回：确认真值→golden，认证解析器→目录 ──
 
 _GOLDEN = "goldset/revenue_golden.json"

@@ -413,6 +413,13 @@ def console_review_task(stock_code: str, year: int = 2025, field: str = "revenue
     return review_task(stock_code, year, field)
 
 
+@app.get("/debug/select")
+def debug_select(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """选表调试台：该字段所有候选表的 得分明细 + 淘汰原因 + 预览，看选表准不准。"""
+    from src.console_service import select_debug
+    return select_debug(stock_code, year, field)
+
+
 class GoldenRequest(BaseModel):
     stock_code: str
     year: int = 2025
