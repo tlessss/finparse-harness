@@ -407,10 +407,10 @@ def console_recode(req: RecodeRequest):
 
 
 @app.get("/review/task")
-def console_review_task(stock_code: str, year: int = 2025):
-    """审核任务：结果 + 溯源(page/bbox) + 渲染页(base64) + 解析器源码。"""
+def console_review_task(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """审核任务：指定字段的 结果 + 溯源(page/bbox) + 渲染页(base64) + 解析器源码。"""
     from src.console_service import review_task
-    return review_task(stock_code, year)
+    return review_task(stock_code, year, field)
 
 
 class GoldenRequest(BaseModel):

@@ -121,9 +121,14 @@ def _cached_engine_parse(code: str, year: int) -> Optional[Dict]:
     pdf = _pdf_path(code, year)
     if not pdf:
         return None
-    from src.parsers.revenue.default import RevenueParser
-    r = RevenueParser({}).parse(pdf, pre_scan=get_tables(code, year))
-    out = {"revenue_breakdown": r.get("revenue_breakdown") or {}, "溯源": r.get("溯源") or {}}
+    # 跑完整引擎拿**全字段**结果(不再只营收)，否则审核页非营收字段全是 None。
+    from src.engine_orchestrator import FinParseAI
+    rp = FinParseAI().run(pdf, stock_code=code, report_year=year,
+                          db_write=False, pre_scan=get_tables(code, year))
+    fields = ("revenue_breakdown", "cost_breakdown", "rnd_info",
+              "employees", "top_clients", "top_suppliers")
+    out = {k: rp.get(k) for k in fields}
+    out["溯源"] = rp.get("溯源") or {}
     os.makedirs(os.path.dirname(cache), exist_ok=True)
     json.dump(out, open(cache, "w", encoding="utf-8"), ensure_ascii=False)
     return out
@@ -152,23 +157,28 @@ def _parser_code_for(code: str) -> str:
             "    return {}\n")
 
 
-def review_task(code: str, year: int) -> Dict:
+def review_task(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     rp = _cached_engine_parse(code, year)
     if rp is None:
         return {"error": "无 PDF/缓存"}
-    prov_all = rp["溯源"] or {}
-    pages = Counter(v["page"] for v in prov_all.values() if isinstance(v, dict) and v.get("page"))
+    prov_all = rp.get("溯源") or {}
+    # 引擎溯源是 {字段: {路径: {page,bbox}}}。取本字段那块(扁平 路径→{page,bbox})。
+    prov_field = prov_all.get(field) if isinstance(prov_all.get(field), dict) else {}
+    # 兼容营收老缓存(直接 {路径:{page,bbox}})
+    if not prov_field and prov_all and all(isinstance(v, dict) and "page" in v for v in prov_all.values()):
+        prov_field = prov_all
+    pages = Counter(v["page"] for v in prov_field.values() if isinstance(v, dict) and v.get("page"))
     page = pages.most_common(1)[0][0] if pages else 1
-    prov = {k: v for k, v in prov_all.items() if isinstance(v, dict) and v.get("page") == page}
+    prov = {k: v for k, v in prov_field.items() if isinstance(v, dict) and v.get("page") == page}
     pdf = _pdf_path(code, year)
     try:
         page_image, w, h = _render_page_b64(pdf, page)
-    except Exception as e:
+    except Exception:
         page_image, w, h = "", 1, 1
-    return {"stock_code": code, "year": year, "page": page,
+    return {"stock_code": code, "year": year, "page": page, "field": field,
             "page_w_pt": w, "page_h_pt": h, "page_image": page_image,
             "parser_code": _parser_code_for(code),
-            "result": rp["revenue_breakdown"], "provenance": prov}
+            "result": rp.get(field), "provenance": prov}
 
 
 # ── 人在回路写回：确认真值→golden，认证解析器→目录 ──
