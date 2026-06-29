@@ -308,6 +308,7 @@ SECTION_ALLOWED = {
     "rnd": [SECTION_FUZHU, SECTION_MGMT],
     "employee": [SECTION_GOV, SECTION_MGMT],   # 员工在第四节公司治理(准则第三十四条)
     "cost": [SECTION_FUZHU, SECTION_MGMT],
+    "client": [SECTION_FUZHU, SECTION_MGMT],
     "supplier": [SECTION_FUZHU, SECTION_MGMT],
 }
 
@@ -325,8 +326,9 @@ _CAPTION_MARKERS = {
     "rnd": ["研发投入", "研发情况", "研发费用"],
     # 第三十四条(公司治理)：专业构成/教育程度
     "employee": ["员工情况", "专业构成", "教育程度", "员工人数", "在职员工"],
-    # 第二十五条：前5名汇总比例(强制)+名称(鼓励)
-    "supplier": ["前五名", "前五大", "主要客户", "主要供应商"],
+    # 第二十五条：前5名客户/供应商 —— 客户和供应商**分开**(否则选表分不清)
+    "client": ["前五名客户", "前五大客户", "主要客户", "向前五名客户", "客户集中"],
+    "supplier": ["前五名供应商", "前五大供应商", "主要供应商", "向前五名供应商", "供应商集中"],
 }
 
 # 各表格类型的计分特征
@@ -363,12 +365,16 @@ TABLE_SIGNATURES = {
         "max_rows": 20,
         "ratio_max": 100,
     },
+    # 客户表 vs 供应商表 必须分开(否则两者得分一样、分不清)：各自排除对方关键词。
+    "client": {
+        "must_have": ["客户名称", "前五名客户", "前五大客户", "主要客户", "销售额"],
+        "exclude": ["供应商", "采购额", "采购总额"],          # 排除供应商表
+        "min_rows": 3, "max_rows": 15, "ratio_max": None,
+    },
     "supplier": {
-        "must_have": ["供应商名称", "客户名称", "前五名", "采购额", "销售额（元）", "销售额"],
-        "exclude": [],
-        "min_rows": 3,
-        "max_rows": 15,
-        "ratio_max": None,
+        "must_have": ["供应商名称", "前五名供应商", "前五大供应商", "主要供应商", "采购额"],
+        "exclude": ["客户", "销售额", "销售总额"],            # 排除客户表
+        "min_rows": 3, "max_rows": 15, "ratio_max": None,
     },
 }
 

@@ -182,7 +182,7 @@ def review_task(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
 
 
 _DBG_SIG = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd",
-            "employees": "employee", "top_clients": "supplier", "top_suppliers": "supplier"}
+            "employees": "employee", "top_clients": "client", "top_suppliers": "supplier"}
 _DBG_ANCHOR = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd_expense"}
 
 

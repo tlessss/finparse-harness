@@ -26,7 +26,7 @@ from src.parsers.infra.table_scanner import filter_by_signature
 # 字段 → filter_by_signature 的信号类型
 _SIG_TYPE = {"revenue_breakdown": "revenue", "cost_breakdown": "cost",
              "rnd_info": "rnd", "employees": "employee",
-             "top_clients": "supplier", "top_suppliers": "supplier"}
+             "top_clients": "client", "top_suppliers": "supplier"}
 
 
 def _shape_str(spec) -> str:
