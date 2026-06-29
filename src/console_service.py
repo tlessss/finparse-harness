@@ -212,11 +212,17 @@ def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict
 
 
 def render_page(code: str, year: int, page: int) -> Dict:
-    """渲染某报告某页为 base64 PNG（选表调试台"看PDF原页"用）。"""
+    """渲染某报告某页为 base64 PNG（选表调试台"看PDF原页"用）。页码越界返回 error。"""
     pdf = _pdf_path(code, year)
     if not pdf:
         return {"error": "无 PDF"}
     try:
+        import fitz
+        doc = fitz.open(pdf)
+        n = len(doc)
+        doc.close()
+        if page < 1 or page > n:
+            return {"error": "页码越界", "page": page}
         img, w, h = _render_page_b64(pdf, page)
         return {"page": page, "page_image": img, "page_w_pt": w, "page_h_pt": h}
     except Exception as e:
