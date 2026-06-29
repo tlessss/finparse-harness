@@ -207,6 +207,18 @@ def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict
         cands.append(bd)
     cands.sort(key=lambda x: -x["total"])
     anchor = (get_anchors(code, year) or {}).get(_DBG_ANCHOR.get(field))
+    top = cands[0] if cands else None
+    try:
+        from src.eval.test_store import save_test
+        save_test("select", code, year, field,
+                  status=("selected" if top and top.get("selected") else "none"),
+                  summary={"top_page": top["page"] if top else None,
+                           "top_score": top["total"] if top else None,
+                           "n_candidates": len(cands), "anchor": anchor},
+                  payload={"candidates": [{k: c.get(k) for k in ("page", "total", "selected", "reject", "caption", "section")}
+                                          for c in cands]})
+    except Exception:
+        pass
     return {"code": code, "year": year, "field": field, "sig": sig,
             "anchor": anchor, "total_tables": len(tables), "candidates": cands}
 
@@ -232,12 +244,21 @@ def route_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     else:
         summary = {}
     anchor = (get_anchors(code, year) or {}).get(_DBG_ANCHOR.get(field))
+    fp_matched = [c.get("key") for c in cands if fp in (c.get("fingerprints") or [])]
+    try:
+        from src.eval.test_store import save_test
+        save_test("route", code, year, field, status=r["status"], confidence=sig.get("confidence"),
+                  summary={"parser_key": r.get("parser_key"), "fp_matched": fp_matched,
+                           "tried": len(r.get("tried") or []), "anchored": sig.get("anchored")},
+                  payload={"fingerprint": fp, "tried": r.get("tried"), "result_summary": summary})
+    except Exception:
+        pass
     return {
         "code": code, "year": year, "field": field,
         "fingerprint": fp, "cache_hit": r.get("cache_hit"),
         "status": r["status"], "parser_key": r.get("parser_key"),
         "n_certified_field": len(cands), "certified_keys": [c.get("key") for c in cands],
-        "fp_matched": [c.get("key") for c in cands if fp in (c.get("fingerprints") or [])],
+        "fp_matched": fp_matched,
         "tried": r.get("tried"),
         "confidence": sig.get("confidence"), "anchored": sig.get("anchored"), "anchor": anchor,
         "result_summary": summary, "result": res,

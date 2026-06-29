@@ -434,6 +434,43 @@ def debug_route(stock_code: str, year: int = 2025, field: str = "revenue_breakdo
     return route_debug(stock_code, year, field)
 
 
+# ── 测试阶段数据库(SQLite) ──
+
+@app.get("/test/list")
+def test_list(stage: str = None, code: str = None, field: str = None, verdict: str = None, limit: int = 500):
+    """列出测试库记录(可按 阶段/报告/字段/判定 筛)。"""
+    from src.eval.test_store import list_tests
+    return {"records": list_tests(stage, code, field, verdict, limit)}
+
+
+@app.get("/test/stats")
+def test_stats():
+    """测试库总览(按 阶段×判定 汇总)。"""
+    from src.eval.test_store import stats
+    return stats()
+
+
+class VerdictRequest(BaseModel):
+    id: int
+    verdict: str            # ok / wrong / ...
+    note: str = ""
+
+
+@app.post("/test/verdict")
+def test_verdict(req: VerdictRequest):
+    """人工给某条测试标判定(对/错)。"""
+    from src.eval.test_store import set_verdict
+    set_verdict(req.id, req.verdict, req.note)
+    return {"ok": True}
+
+
+@app.get("/test/{rid}")
+def test_get(rid: int):
+    """取一条测试记录的完整快照。"""
+    from src.eval.test_store import get_test
+    return get_test(rid) or {"error": "不存在"}
+
+
 class GoldenRequest(BaseModel):
     stock_code: str
     year: int = 2025
