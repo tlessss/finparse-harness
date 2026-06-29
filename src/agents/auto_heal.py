@@ -54,10 +54,37 @@ def _extract_json(raw: str):
         return None
 
 
+_UNIT_NAME = {1000: "千元", 10000: "万元", 100000000: "亿元"}
+
+
+def _scale_amounts(val, spec, ratio):
+    """把抽出的所有金额 ×ratio(单位换算兜底);占比不动。"""
+    import copy
+    v = copy.deepcopy(val)
+    amt = spec.amount_key
+
+    def _rows(rows):
+        for r in rows:
+            if isinstance(r, dict) and isinstance(r.get(amt), (int, float)):
+                r[amt] = r[amt] * ratio
+
+    if isinstance(v, dict):
+        for k, rows in v.items():
+            if isinstance(rows, list):
+                _rows(rows)
+            elif k == getattr(spec, "total_key", None) and isinstance(rows, (int, float)):
+                v[k] = rows * ratio
+    elif isinstance(v, list):
+        _rows(v)
+    return v
+
+
 def llm_extract_golden(spec, code: str, year: int, log=print) -> Optional[Dict]:
-    """LLM 从候选原表抽出本字段的 golden；只有**过 DB 锚**(置信 high)才返回，否则 None。"""
+    """LLM 从候选原表抽出本字段的 golden；只有**过 DB 锚**(置信 high)才返回，否则 None。
+    单位：检测表单位(千元/万元)明确提示 LLM；并做确定性兜底(没换算就 ×ratio 再判)。"""
     if not spec.anchor_key:                       # 无锚字段(客户/供应商)抽了也没法验 → 不抽
         return None
+    from src.parsers.infra.unit_detector import detect_unit
     tables = get_tables(code, year)
     if not tables:
         return None
@@ -67,11 +94,16 @@ def llm_extract_golden(spec, code: str, year: int, log=print) -> Optional[Dict]:
         table_text = _serialize(cand.get("table") or [])
         if not table_text:
             continue
+        ratio = detect_unit(table_text)
+        unit_hint = (f"⚠本表金额单位是【{_UNIT_NAME.get(ratio, str(ratio) + '元')}】，"
+                     f"每个金额必须×{ratio}换算成【元】再输出(例:表里写1,234→输出{1234 * ratio})。\n"
+                     if ratio > 1 else "")
         prompt = (
             f"从下面这张年报表格里，抽取 **{year}年(本期，不是上期/去年)** 的「{spec.label}」结构化数据。\n"
+            f"{unit_hint}"
             f"准则口径：{spec.spec_note}\n"
             f"输出 JSON，形如：{_shape(spec)}\n"
-            f"要点：①只要本期({year}年)那一列，别拿上期/去年；②金额单位换算成元；"
+            f"要点：①只要本期({year}年)那一列，别拿上期/去年；②金额换算成元(见上方单位提示)；"
             f"③占比是百分数(如60.8表示60.8%)；④跳过合计/小计行；⑤分项要全。\n"
             f"只输出 JSON，不要解释。\n\n表格：\n{table_text}"
         )
@@ -85,6 +117,13 @@ def llm_extract_golden(spec, code: str, year: int, log=print) -> Optional[Dict]:
         if val is None:
             continue
         sig = field_plausibility(spec, val, anchors)
+        # 单位兜底：没过锚但表是千元/万元 → 试 ×ratio 再判(LLM 漏换算的确定性补救)
+        if sig.get("confidence") != "high" and ratio > 1:
+            val2 = _scale_amounts(val, spec, ratio)
+            sig2 = field_plausibility(spec, val2, anchors)
+            if sig2.get("confidence") == "high":
+                val, sig = val2, sig2
+                log(f"    （单位兜底 ×{ratio} 生效）")
         log(f"    LLM抽取 {spec.label}: 锚验证 confidence={sig.get('confidence')}")
         if sig.get("confidence") == "high":       # 分项和≈DB锚 → 可信 golden
             return val
