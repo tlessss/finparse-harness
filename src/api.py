@@ -427,6 +427,13 @@ def debug_page(stock_code: str, year: int = 2025, page: int = 1):
     return render_page(stock_code, year, page)
 
 
+@app.get("/debug/route")
+def debug_route(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """路由测试台：指纹/命中认证解析器/路由结果/试过的候选/过锚。"""
+    from src.console_service import route_debug
+    return route_debug(stock_code, year, field)
+
+
 class GoldenRequest(BaseModel):
     stock_code: str
     year: int = 2025

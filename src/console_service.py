@@ -211,6 +211,39 @@ def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict
             "anchor": anchor, "total_tables": len(tables), "candidates": cands}
 
 
+def route_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """路由测试台：这份报告该字段的 指纹 / 命中哪些认证解析器 / 路由到谁 / 试了哪些候选 / 结果过锚没。"""
+    from src.eval.field_spec import get_spec
+    from src.parsers.revenue_router import route_field, field_plausibility
+    from src.eval.anchors import get_anchors
+    from src.eval.parser_catalog import load_certified
+    if get_tables(code, year) is None:
+        return {"error": "无缓存（先解析一次该报告）"}
+    spec = get_spec(field)
+    r = route_field(spec, code, year)
+    sig = field_plausibility(spec, r.get("result"), get_anchors(code, year))
+    cands = [c for c in load_certified() if c.get("field", "revenue_breakdown") == field]
+    fp = r.get("fingerprint")
+    res = r.get("result")
+    if isinstance(res, dict):
+        summary = {k: len(v) for k, v in res.items() if isinstance(v, list)}
+    elif isinstance(res, list):
+        summary = {"明细": len(res)}
+    else:
+        summary = {}
+    anchor = (get_anchors(code, year) or {}).get(_DBG_ANCHOR.get(field))
+    return {
+        "code": code, "year": year, "field": field,
+        "fingerprint": fp, "cache_hit": r.get("cache_hit"),
+        "status": r["status"], "parser_key": r.get("parser_key"),
+        "n_certified_field": len(cands), "certified_keys": [c.get("key") for c in cands],
+        "fp_matched": [c.get("key") for c in cands if fp in (c.get("fingerprints") or [])],
+        "tried": r.get("tried"),
+        "confidence": sig.get("confidence"), "anchored": sig.get("anchored"), "anchor": anchor,
+        "result_summary": summary, "result": res,
+    }
+
+
 def render_page(code: str, year: int, page: int) -> Dict:
     """渲染某报告某页为 base64 PNG（选表调试台"看PDF原页"用）。页码越界返回 error。"""
     pdf = _pdf_path(code, year)
