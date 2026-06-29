@@ -51,6 +51,13 @@ class RevenueParser(BaseParser):
         return name_col, amount_col, ratio_col
 
     def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
+        # 优先用缓存(已跨页拼接完整)的表 + caption 选表 —— 避免自抽截断
+        # (000333 自抽只到17行,漏分地区/分销售模式;缓存拼接表是22行完整的)
+        if pre_scan:
+            r = self._parse_from_prescan(pre_scan)
+            if r is not None:
+                return r
+
         candidate_pages = self._find_candidate_pages(pdf_path)
         if not candidate_pages:
             return {"revenue_breakdown": None, "status": "no_table_found"}
@@ -62,6 +69,23 @@ class RevenueParser(BaseParser):
 
         unit_ratio = self._detect_unit_from_pdf(pdf_path, candidate_pages)
         best = self._select_best_table(revenue_tables)
+        result, provenance = self._classify(best, unit_ratio=unit_ratio)
+        return {"revenue_breakdown": result, "溯源": provenance, "status": "ok"}
+
+    def _parse_from_prescan(self, pre_scan: list) -> Optional[Dict]:
+        """用缓存表(scan_pdf 的完整拼接结果) + caption 选表 → 解析。失败返回 None 让上层回退自抽。"""
+        from src.parsers.infra.table_scanner import filter_by_signature
+        from src.parsers.infra.unit_detector import detect_unit
+        cands = filter_by_signature(pre_scan, "revenue")
+        if not cands:
+            return None
+        top = cands[0]
+        best = top["table"]
+        item = next((x for x in pre_scan if x.get("table") is best), None)
+        unit_text = (item.get("caption", "") + " " + item.get("text", "")) if item else ""
+        unit_ratio = detect_unit(unit_text)
+        # 溯源:用缓存表自带的 cell_bbox
+        self._bbox_map = {id(best): (top.get("page"), (item or {}).get("cell_bbox"))} if item else {}
         result, provenance = self._classify(best, unit_ratio=unit_ratio)
         return {"revenue_breakdown": result, "溯源": provenance, "status": "ok"}
 
@@ -349,6 +373,8 @@ class RevenueParser(BaseParser):
                     ratio_raw = cells[ratio_col] if ratio_col is not None and ratio_col < len(cells) else ""
 
             if not name or name in ("项 目", "项目", "") or is_total_row(name):
+                continue
+            if name.startswith("其中"):       # "其中：X" 是上一项的子拆分,不计入顶层(否则重复计数)
                 continue
             # 可配置排除项（供优化 Agent 在沙箱中调参；默认空）
             if name.strip() in self._extra_exclude():

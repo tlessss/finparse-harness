@@ -202,7 +202,7 @@ def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict
         if not relevant:
             continue
         bd["preview"] = [[(c or "").replace("\n", " ").strip()[:14] for c in row]
-                         for row in (it["table"] or [])[:10]]
+                         for row in (it["table"] or [])[:40]]   # 预览全表(原10行会看着像不完整)
         bd["table_bbox"] = it.get("table_bbox")     # 给前端在PDF原页上高亮表位置
         cands.append(bd)
     cands.sort(key=lambda x: -x["total"])
