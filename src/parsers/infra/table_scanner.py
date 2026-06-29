@@ -156,14 +156,22 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     #   tbl.bbox           : (x0,y0,x1,y1) 整表外框；tbl.rows[].cells → 每格 bbox（原点左下角）
     with pdfplumber.open(pdf_path) as pdf:
         npages = len(pdf.pages)
-        # 章节驱动选页：扫"管理层讨论+附注"的全部页(明细表都在这两章)，跳过封面/目录/备查(other)。
-        # 章节可用时**不再按固定页码截断** → 长报告的附注尾部不会被切掉(修 max_pages 漏表)。
-        relevant = [pn for pn in range(1, npages + 1)
-                    if page_context.get(pn) in (SECTION_MGMT, SECTION_FUZHU)]
-        if relevant:
-            pages_to_scan = [pn for pn in relevant if pn <= _SCAN_HARD_CAP]
-        else:                                         # 章节退化(无书签且子串没命中) → 回退旧固定窗口
-            pages_to_scan = list(range(16, min(15 + max_pages, npages) + 1))
+        # 选扫描范围：关键是**不能用不可靠的章节去裁剪**(无书签时子串扫描会在附注中途误翻 other → 漏附注尾)。
+        #   有 PDF 书签(章节可靠) → 按章节扫 management+fuzhu，跳过封面/目录/备查(other)，高效且不漏。
+        #   无书签(章节不可信)   → 全扫 第16页~全文末(只用安全上限防极端长 PDF)，宁可多扫也不漏。
+        try:
+            _doc = fitz.open(pdf_path)
+            _toc = _doc.get_toc()
+            _doc.close()
+            reliable = bool(_toc) and bool(_context_from_toc(_toc, npages))
+        except Exception:
+            reliable = False
+        if reliable:
+            pages_to_scan = [pn for pn in range(1, npages + 1)
+                             if page_context.get(pn) in (SECTION_MGMT, SECTION_FUZHU)
+                             and pn <= _SCAN_HARD_CAP]
+        else:
+            pages_to_scan = list(range(16, min(npages, _SCAN_HARD_CAP) + 1))
 
         for pn in pages_to_scan:
             page = pdf.pages[pn - 1]
