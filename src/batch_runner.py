@@ -45,6 +45,8 @@ def control(action: str) -> Dict:
         s["paused"] = False
     elif action == "stop":
         s["stopped"], s["paused"] = True, False
+        s["awaiting"] = False           # 立刻清单步暂停态 → 前端暂停面板马上消失
+        s["step_data"] = None
     _write(s)
     return s
 
@@ -207,6 +209,9 @@ def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
 
     state["running"] = False
     state["current"] = None
+    state["awaiting"] = False          # 清单步暂停态(否则停止后前端暂停面板还赖着,看着像没停)
+    state["step_data"] = None
+    state["stage"] = None
     state["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     _save_progress(state)
     return state
