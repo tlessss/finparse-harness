@@ -59,14 +59,65 @@ def _push_recent(state: Dict, rec: Dict) -> None:
 
 
 def _save_progress(state: Dict) -> None:
-    """写进度时**保留磁盘上的控制标志**(stopped/paused 归 control() 管)，避免覆盖。"""
+    """写进度时**保留磁盘上的控制标志**(stopped/paused/step_continue 归 control/前端管)，避免覆盖。"""
     disk = _read()
     _write({**state, "stopped": disk.get("stopped", False),
-            "paused": disk.get("paused", False)})
+            "paused": disk.get("paused", False),
+            "step_continue": disk.get("step_continue", False)})
+
+
+def _breakpoint(state: Dict, stage: str, data, log: Callable) -> bool:
+    """单步断点：写出该阶段详细数据、置 awaiting，等前端"继续"(step_continue)或"停止"。
+    返回 True=继续 / False=停止。"""
+    state["stage"] = stage
+    state["step_data"] = data
+    state["awaiting"] = True
+    _save_progress(state)
+    log(f"  ⏸ 断点[{stage}] 等待确认…")
+    while True:
+        time.sleep(1)
+        disk = _read()
+        if disk.get("stopped"):
+            return False
+        if disk.get("step_continue"):
+            disk["step_continue"] = False               # 消费掉这次"继续"
+            disk["awaiting"] = False
+            disk["step_data"] = None
+            _write(disk)
+            state["awaiting"] = False
+            return True
+
+
+def _table_preview(tables) -> Dict:
+    """抽表阶段给前端看的数据：每个字段的候选表(页码+前几行预览)，让人确认抽对没。"""
+    from src.parsers.infra.table_scanner import filter_by_signature
+    out: Dict = {"_total_tables": len(tables or [])}
+    for label, sig in [("营收", "revenue"), ("成本", "cost"), ("研发", "rnd"), ("员工", "employee")]:
+        cands = filter_by_signature(tables or [], sig)[:1]
+        if cands:
+            t = cands[0]
+            rows = [[(c or "").replace("\n", " ").strip()[:14] for c in row]
+                    for row in (t.get("table") or [])[:8]]
+            out[label] = {"page": t.get("page"), "rows": rows}
+    return out
+
+
+def _result_preview(out: Dict, fields: Dict) -> Dict:
+    """解析+判定阶段给前端看的数据：每个字段 状态/来源/置信度/锚 + 条数。"""
+    sigs = out.get("signals") or {}
+    fld = {}
+    for f in ("revenue_breakdown", "cost_breakdown", "rnd_info", "employees", "top_clients", "top_suppliers"):
+        v = out.get(f)
+        n = (sum(len(x) for x in v.values() if isinstance(x, list)) if isinstance(v, dict)
+             else (len(v) if isinstance(v, list) else 0))
+        s = sigs.get(f) or {}
+        fld[f] = {"status": fields.get(f), "source": s.get("source"),
+                  "confidence": s.get("confidence"), "anchored": s.get("anchored"), "n": n}
+    return {"fields": fld}
 
 
 def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
-              heal: bool = False, log: Callable = print) -> Dict:
+              heal: bool = False, step: bool = False, log: Callable = print) -> Dict:
     """跑一批报告。返回最终状态(进度+分布)。起停由 control() 写标志、本函数只读不覆盖。"""
     from src.engine_orchestrator import FinParseAI
     from src.eval.triage_queue import triage_report
@@ -99,6 +150,9 @@ def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
         else:
             try:
                 pre = get_tables(code, year)         # 缓存表则不重扫
+                # 单步断点①：抽表 —— 给人看候选表,确认抽对没,不对就停
+                if step and not _breakpoint(state, "抽表", _table_preview(pre), log):
+                    break
 
                 def _stage(field):                   # 引擎每解析一个字段就回调 → 实时上报
                     state["stage"] = field
@@ -109,6 +163,9 @@ def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
                 recs = triage_report(code, year)     # 落盘台账
                 # 逐字段结果：ok(绿) / needs_write(红) / unverified(黄) / low_confidence(橙)
                 fields = {r["field"]: ("ok" if r["status"] == "ok" else r["reason"]) for r in recs}
+                # 单步断点②：解析+判定 —— 给人看每字段解出什么/置信度,确认没问题再往下(自愈/写库)
+                if step and not _breakpoint(state, "解析+判定", _result_preview(out, fields), log):
+                    break
                 # ── 完整流程：对不可信且有锚的字段，自动走 LLM 自愈(抽golden→写解析器→认证) ──
                 if heal:
                     from src.agents.auto_heal import auto_heal_field

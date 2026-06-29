@@ -542,6 +542,7 @@ class BatchStartRequest(BaseModel):
     year: int = 2025
     db_write: bool = False
     heal: bool = False          # 完整流程：失败字段自动走 LLM 自愈(慢,测试用)
+    step: bool = False          # 单步模式：每阶段(抽表/解析判定/...)暂停等确认
 
 
 @app.post("/batch/start")
@@ -552,9 +553,20 @@ def batch_start(req: BatchStartRequest):
     cur = progress()
     if cur.get("running"):
         return {"error": "已有批量在跑", "progress": cur}
-    threading.Thread(target=run_batch, args=(req.codes, req.year, req.db_write, req.heal),
+    threading.Thread(target=run_batch,
+                     args=(req.codes, req.year, req.db_write, req.heal, req.step),
                      daemon=True).start()
-    return {"started": True, "total": len(req.codes), "heal": req.heal}
+    return {"started": True, "total": len(req.codes), "heal": req.heal, "step": req.step}
+
+
+@app.post("/batch/step/continue")
+def batch_step_continue():
+    """单步模式：放行当前断点，继续下一阶段。"""
+    from src.batch_runner import _read, _write
+    d = _read()
+    d["step_continue"] = True
+    _write(d)
+    return {"ok": True}
 
 
 @app.get("/batch/progress")
