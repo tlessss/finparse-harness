@@ -40,6 +40,38 @@ _SECTION_MARKERS = [
     ("董事、监事", SECTION_OTHER),
 ]
 
+# PDF 大纲(书签)章节标记 —— 权威结构，优先于全文子串扫描
+_TOC_MARKERS = [
+    ("管理层讨论与分析", SECTION_MGMT),
+    ("经营情况讨论与分析", SECTION_MGMT),
+    ("董事会报告", SECTION_MGMT),
+    ("财务报告", SECTION_FUZHU),
+    ("财务报表", SECTION_FUZHU),
+    ("备查文件", SECTION_OTHER),
+]
+
+
+def _context_from_toc(toc: list, npages: int) -> Dict[int, str]:
+    """从 PDF 大纲(第X节)构建 页→章节 映射。无可用边界则返回 {} (让上层回退子串扫描)。"""
+    bounds = []
+    for level, title, page in toc:
+        if level != 1:                       # 只用一级"第X节"做边界，避免子条目误切
+            continue
+        for marker, sec in _TOC_MARKERS:
+            if marker in title:
+                bounds.append((page, sec))
+                break
+    if not bounds:
+        return {}
+    bounds.sort(key=lambda x: x[0])
+    ctx, cur, bi = {}, SECTION_OTHER, 0
+    for pn in range(1, npages + 1):
+        while bi < len(bounds) and bounds[bi][0] <= pn:
+            cur = bounds[bi][1]
+            bi += 1
+        ctx[pn] = cur
+    return ctx
+
 
 def detect_page_context(pdf_path: str) -> Dict[int, str]:
     """
@@ -54,6 +86,18 @@ def detect_page_context(pdf_path: str) -> Dict[int, str]:
     except Exception:
         return {}
 
+    # ① 优先用 PDF 大纲(书签)：权威的"第X节→页码"结构，远比全文子串扫描准
+    try:
+        toc = doc.get_toc()
+    except Exception:
+        toc = None
+    if toc:
+        ctx = _context_from_toc(toc, len(doc))
+        if ctx:
+            doc.close()
+            return ctx
+
+    # ② 回退：全文子串粘性扫描(无书签的报告，如部分老年报)
     context = {}  # {page_num: section}
     current_section = SECTION_OTHER
 
@@ -100,8 +144,14 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     """
     # 先扫一遍全文，得到"每页属于哪个章节"
     page_context = detect_page_context(pdf_path)
+    print(page_context,'content page')
     results = []
 
+    # pdfplumber.open() → PDF 对象（上下文管理器，退出时自动关文件）
+    #   pdf.pages          : list[Page]，0-indexed，pdf.pages[i] = 第 i+1 页
+    #   page.width/height  : 页宽高(pt)；page.find_tables() → list[Table]
+    #   tbl.extract()      : list[list[str|None]] 二维格子文本
+    #   tbl.bbox           : (x0,y0,x1,y1) 整表外框；tbl.rows[].cells → 每格 bbox（原点左下角）
     with pdfplumber.open(pdf_path) as pdf:
         end_page = min(15 + max_pages, len(pdf.pages))
         for page_num in range(15, end_page):          # 跳过前15页(封面/目录)，从正文扫
@@ -139,12 +189,14 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
 # ── 表格类型特征配置 ──
 
 # 每个表格类型允许的章节上下文
+# 各字段目标表"通常所在章节"。营收/成本构成、前五大客户供应商本就在 MD&A(管理层讨论)，
+# 故允许 management；附注里也常有明细 → 两者都给加分。章节是弱先验(见下方打分降权)。
 SECTION_ALLOWED = {
-    "revenue": [SECTION_FUZHU],
-    "rnd": [SECTION_FUZHU],
-    "employee": [SECTION_FUZHU],
-    "cost": [SECTION_FUZHU],
-    "supplier": [SECTION_FUZHU],
+    "revenue": [SECTION_FUZHU, SECTION_MGMT],
+    "rnd": [SECTION_FUZHU, SECTION_MGMT],
+    "employee": [SECTION_FUZHU, SECTION_MGMT],
+    "cost": [SECTION_FUZHU, SECTION_MGMT],
+    "supplier": [SECTION_FUZHU, SECTION_MGMT],
 }
 
 # 各表格类型的计分特征
@@ -223,12 +275,13 @@ def filter_by_signature(tables: List[Dict], sig_type: str,
 
         score = 0
 
-        # 上下文过滤：附注章节大加分，其它区域减分
+        # 上下文过滤：章节是**弱先验**(非硬门) —— 在预期章节小加分，其它区域小减分；
+        # 主信号交给下面的表内容特征(must_have +25/个)。避免章节判断左右选表。
         if enforce_section and allowed_sections:
             if section in allowed_sections:
-                score += 30
+                score += 20
             else:
-                score -= 15
+                score -= 8
 
         # 行数过滤
         if len(t) < min_rows or len(t) > max_rows:
