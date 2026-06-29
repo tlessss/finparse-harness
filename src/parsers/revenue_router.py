@@ -92,11 +92,21 @@ def _attach_confidence(spec: FieldSpec, value, anchors, sig: Dict) -> Dict:
     anchor = (anchors or {}).get(key) if key else None
     if not anchor:
         sig["anchored"], sig["confidence"] = None, "unknown"
+        return sig
+    if spec.cls == "B":
+        total = (value or {}).get(spec.total_key)
+        anchored = bool(total and abs(total - anchor) <= 0.03 * anchor)
     else:
-        total = _parsed_total(spec, value)
-        sig["anchored"] = bool(total and abs(total - anchor) <= 0.03 * anchor)
-        sig["confidence"] = "high" if sig["anchored"] else "low"
-        sig["anchor"] = anchor
+        # A 类：各维度(行业/产品/地区/销售模式)是同一营收总额的不同切分 → **任一维度和≈锚即过锚**。
+        # 某维度抓串/漏行(如000333的segments)不该否定整体；旧的"取最大维度"会被抓大的坏维度毒化。
+        dim_sums = [s for s in (sum((r.get(spec.amount_key) or 0) for r in (rows or []))
+                                for rows in as_dims(value, spec).values()) if s]
+        anchored = any(abs(s - anchor) <= 0.03 * anchor for s in dim_sums)
+        total = min(dim_sums, key=lambda s: abs(s - anchor)) if dim_sums else None  # 展示:最接近锚的维度和
+    sig["anchored"] = anchored
+    sig["confidence"] = "high" if anchored else "low"
+    sig["anchor"] = anchor
+    sig["parsed_total"] = total
     return sig
 
 
