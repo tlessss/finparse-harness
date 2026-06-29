@@ -24,6 +24,9 @@ SECTION_FUZHU = "fuzhu"        # 财务报表附注
 SECTION_MGMT = "management"     # 管理层讨论与分析
 SECTION_OTHER = "other"         # 其它（封面、目录等）
 
+# 扫描安全上限：章节驱动扫描时防极端长 PDF 跑飞(正常年报≤300页,不会触及)
+_SCAN_HARD_CAP = 350
+
 # 章节切换关键词（按优先级排序）
 _SECTION_MARKERS = [
     # 附注开始标记
@@ -144,7 +147,6 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     """
     # 先扫一遍全文，得到"每页属于哪个章节"
     page_context = detect_page_context(pdf_path)
-    print(page_context,'content page')
     results = []
 
     # pdfplumber.open() → PDF 对象（上下文管理器，退出时自动关文件）
@@ -153,10 +155,18 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     #   tbl.extract()      : list[list[str|None]] 二维格子文本
     #   tbl.bbox           : (x0,y0,x1,y1) 整表外框；tbl.rows[].cells → 每格 bbox（原点左下角）
     with pdfplumber.open(pdf_path) as pdf:
-        end_page = min(15 + max_pages, len(pdf.pages))
-        for page_num in range(15, end_page):          # 跳过前15页(封面/目录)，从正文扫
-            page = pdf.pages[page_num]
-            pn = page_num + 1
+        npages = len(pdf.pages)
+        # 章节驱动选页：扫"管理层讨论+附注"的全部页(明细表都在这两章)，跳过封面/目录/备查(other)。
+        # 章节可用时**不再按固定页码截断** → 长报告的附注尾部不会被切掉(修 max_pages 漏表)。
+        relevant = [pn for pn in range(1, npages + 1)
+                    if page_context.get(pn) in (SECTION_MGMT, SECTION_FUZHU)]
+        if relevant:
+            pages_to_scan = [pn for pn in relevant if pn <= _SCAN_HARD_CAP]
+        else:                                         # 章节退化(无书签且子串没命中) → 回退旧固定窗口
+            pages_to_scan = list(range(16, min(15 + max_pages, npages) + 1))
+
+        for pn in pages_to_scan:
+            page = pdf.pages[pn - 1]
             section = page_context.get(pn, SECTION_OTHER)
 
             for tbl in page.find_tables():            # 这一页上的每张表
