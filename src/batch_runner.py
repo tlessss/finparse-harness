@@ -88,17 +88,25 @@ def _breakpoint(state: Dict, stage: str, data, log: Callable) -> bool:
             return True
 
 
-def _table_preview(tables) -> Dict:
-    """抽表阶段给前端看的数据：每个字段的候选表(页码+前几行预览)，让人确认抽对没。"""
+def _table_preview(tables, year: int = None, judge: bool = False) -> Dict:
+    """抽表阶段给前端看的数据：每个字段的候选表(页码+预览)。judge=True 时额外让 LLM 判
+    '是不是目标表/抽取干不干净'，把挑错表/抽错位在解析前就标出来。"""
     from src.parsers.infra.table_scanner import filter_by_signature
     out: Dict = {"_total_tables": len(tables or [])}
-    for label, sig in [("营收", "revenue"), ("成本", "cost"), ("研发", "rnd"), ("员工", "employee")]:
+    fields = [("营收", "revenue", "revenue_breakdown"), ("成本", "cost", "cost_breakdown"),
+              ("研发", "rnd", "rnd_info"), ("员工", "employee", "employees")]
+    for label, sig, field in fields:
         cands = filter_by_signature(tables or [], sig)[:1]
         if cands:
             t = cands[0]
             rows = [[(c or "").replace("\n", " ").strip()[:14] for c in row]
                     for row in (t.get("table") or [])[:8]]
-            out[label] = {"page": t.get("page"), "rows": rows}
+            entry = {"page": t.get("page"), "rows": rows}
+            if judge:
+                from src.agents.extract_judge import judge_extraction
+                from src.eval.field_spec import get_spec
+                entry["verdict"] = judge_extraction(get_spec(field), t, year)
+            out[label] = entry
     return out
 
 
@@ -150,8 +158,8 @@ def run_batch(codes: List[str], year: int = 2025, db_write: bool = False,
         else:
             try:
                 pre = get_tables(code, year)         # 缓存表则不重扫
-                # 单步断点①：抽表 —— 给人看候选表,确认抽对没,不对就停
-                if step and not _breakpoint(state, "抽表", _table_preview(pre), log):
+                # 单步断点①：抽表 —— 给人看候选表 + LLM 判定(是不是目标表/抽得干不干净),不对就停
+                if step and not _breakpoint(state, "抽表", _table_preview(pre, year, judge=True), log):
                     break
 
                 def _stage(field):                   # 引擎每解析一个字段就回调 → 实时上报
