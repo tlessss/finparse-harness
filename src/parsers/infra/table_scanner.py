@@ -130,6 +130,23 @@ def _align_bbox(grid: list, cell_bbox: list) -> list:
     return out
 
 
+def _caption_above(page, table_bbox, band: float = 80) -> str:
+    """取表格正上方同页文本(最靠近表格的几行) = 表格标题/上文。
+    比表体关键词稳得多：'（1）营业收入构成' 这类标题几乎确定性地标明表是什么。"""
+    if not table_bbox:
+        return ""
+    try:
+        top = table_bbox[1]
+        if top <= 1:
+            return ""
+        crop = page.crop((0, max(0, top - band), page.width, top))
+        txt = crop.extract_text() or ""
+    except Exception:
+        return ""
+    lines = [ln.strip() for ln in txt.split("\n") if ln.strip()]
+    return " ".join(lines[-3:])             # 紧贴表格上方的最后几行
+
+
 def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     """
     扫描 PDF 正文页，提取所有表格，每张表附带页码、章节上下文与单元格坐标(溯源用)。
@@ -192,13 +209,15 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
                 cell_bbox = _align_bbox(grid, cell_bbox)   # 补齐成和 grid 完全同形状
 
                 text = " ".join(c.replace("\n", " ") for row in grid for c in row if c)
+                tbb = tuple(tbl.bbox) if getattr(tbl, "bbox", None) else None
                 results.append({
                     "page": pn,
                     "table": grid,
                     "text": text,
+                    "caption": _caption_above(page, tbb),   # 表格上文标题(选表主信号)
                     "section": section,
                     "cell_bbox": cell_bbox,
-                    "table_bbox": tuple(tbl.bbox) if getattr(tbl, "bbox", None) else None,
+                    "table_bbox": tbb,
                 })
 
     return results
@@ -215,6 +234,17 @@ SECTION_ALLOWED = {
     "employee": [SECTION_FUZHU, SECTION_MGMT],
     "cost": [SECTION_FUZHU, SECTION_MGMT],
     "supplier": [SECTION_FUZHU, SECTION_MGMT],
+}
+
+# 表格"上文标题"标记词 —— 选表的最强信号(标题确定性地标明表是什么，比表体关键词稳)。
+# caption 强命中 → 大加分 + 豁免 must_have 硬门(救抽取乱掉、表体没词但标题清楚的表)。
+_CAPTION_MARKERS = {
+    "revenue": ["营业收入构成", "收入构成", "营业收入和营业成本", "主营业务分", "分部报告",
+                "分行业", "分产品", "分地区", "分销售"],
+    "cost": ["营业成本构成", "成本构成", "营业收入和营业成本", "主营业务分", "分部报告"],
+    "rnd": ["研发投入", "研发费用"],
+    "employee": ["员工情况", "员工人数", "专业构成", "教育程度", "人员构成"],
+    "supplier": ["前五名", "前五大", "主要客户", "主要供应商"],
 }
 
 # 各表格类型的计分特征
@@ -284,17 +314,21 @@ def filter_by_signature(tables: List[Dict], sig_type: str,
     ratio_max = sig.get("ratio_max")
     allowed_sections = SECTION_ALLOWED.get(sig_type, [])
 
+    caption_markers = _CAPTION_MARKERS.get(sig_type, [])
     scored = []
     for item in tables:
         t = item["table"]
         text = item["text"]
+        caption = item.get("caption", "")
         section = item.get("section", SECTION_OTHER)
         score = 0
 
-        score = 0
+        # ① caption(表格上文标题)是最强信号：'（1）营业收入构成' 这类标题确定性地标明表是什么
+        cap_hit = any(m in caption for m in caption_markers)
+        if cap_hit:
+            score += 40
 
-        # 上下文过滤：章节是**弱先验**(非硬门) —— 在预期章节小加分，其它区域小减分；
-        # 主信号交给下面的表内容特征(must_have +25/个)。避免章节判断左右选表。
+        # ② 章节：弱先验(非硬门) —— 预期章节小加分、其它小减分；主信号交给标题/表内容
         if enforce_section and allowed_sections:
             if section in allowed_sections:
                 score += 20
@@ -305,15 +339,15 @@ def filter_by_signature(tables: List[Dict], sig_type: str,
         if len(t) < min_rows or len(t) > max_rows:
             continue
 
-        # 正向特征：至少命中 1 个 must_have
+        # ③ 表体特征：至少命中 1 个 must_have
         must_hit = 0
         for kw in must_have:
             if kw in text:
                 score += 25
                 must_hit += 1
 
-        # 必须命中至少 1 个 must_have（如果配置了 must_have 的话）
-        if must_have and must_hit == 0:
+        # must_have 硬门 —— caption 强命中可豁免(救抽取乱掉、表体没词但标题清楚的表，如 000878)
+        if must_have and must_hit == 0 and not cap_hit:
             continue
 
         # 排除特征
