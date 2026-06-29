@@ -125,7 +125,12 @@ def field_plausibility(spec: FieldSpec, value, anchors: Dict = None) -> Dict:
         sig = _plaus_c(spec, value)
     else:
         sig = _plaus_a(spec, value)
-    return _attach_confidence(spec, value, anchors, sig)
+    sig = _attach_confidence(spec, value, anchors, sig)
+    # A 类：锚为主、占比为辅 —— 分项和过 DB 锚就算可信(不必有占比列;锚比占比和≈100 靠谱)。
+    # 占比仍保留(_plaus_a)：救按产品成本(锚对不上但各产品占比和=100)和无锚兜底。
+    if spec.cls == "A" and sig.get("anchored"):
+        sig["clean"] = True
+    return sig
 
 
 def revenue_plausibility(rb: Optional[Dict]) -> Dict:
