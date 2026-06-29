@@ -150,6 +150,74 @@ def _caption_above(page, table_bbox, band: float = 80) -> str:
     return " ".join(lines[-3:])             # 紧贴表格上方的最后几行
 
 
+# ── 跨页/页内表格拼接（一张逻辑表被 find_tables 按页切碎 → 拼回完整）──
+
+def _ncols(grid) -> int:
+    """表的真实列数 = 最常见的行长(避开 ragged 行干扰)。"""
+    from collections import Counter
+    if not grid:
+        return 0
+    return Counter(len(r) for r in grid).most_common(1)[0][0]
+
+
+def _row_key(row) -> tuple:
+    return tuple((c or "").strip() for c in row)
+
+
+def _is_continuation(A: Dict, B: Dict, bottom_margin=80, top_margin=130, intra_gap=35) -> bool:
+    """B 是不是 A(或A拼接链尾)的续表？列数相同 + 位置接续(页内贴邻 / 跨页:上贴页底+下贴页顶)。"""
+    if _ncols(A["table"]) != _ncols(B["table"]) or _ncols(B["table"]) == 0:
+        return False
+    bb = B.get("table_bbox")
+    if not bb:
+        return False
+    a_page = A.get("_tail_page", A["page"])
+    a_bottom = A.get("_tail_bottom")
+    a_page_h = A.get("_tail_page_h", A.get("page_h"))
+    if a_bottom is None:
+        a_bottom = A["table_bbox"][3] if A.get("table_bbox") else None
+    if a_bottom is None:
+        return False
+    b_top = bb[1]
+    if B["page"] == a_page:                                   # 页内：垂直相邻、间距小
+        return 0 <= b_top - a_bottom < intra_gap
+    if B["page"] == a_page + 1:                               # 跨页：A贴页底 + B贴页顶
+        return a_bottom >= (a_page_h or 1e9) - bottom_margin and b_top <= top_margin
+    return False
+
+
+def _merge_into(A: Dict, B: Dict) -> None:
+    """把 B 的数据行并进 A(跳重复表头)；合并 cell_bbox/text；更新拼接链尾位置。"""
+    b_rows = list(B["table"])
+    b_bbox = list(B.get("cell_bbox") or [])
+    if b_rows and A["table"] and _row_key(b_rows[0]) == _row_key(A["table"][0]):
+        b_rows = b_rows[1:]                                   # 续表重复了表头 → 跳掉
+        b_bbox = b_bbox[1:] if b_bbox else b_bbox
+    A["table"] = A["table"] + b_rows
+    if A.get("cell_bbox") is not None and b_bbox:
+        A["cell_bbox"] = A["cell_bbox"] + b_bbox
+    A["text"] = A["text"] + " " + " ".join(c.replace("\n", " ") for row in b_rows for c in row if c)
+    # 记录拼接链尾(支持一张表跨 3+ 页连续拼)
+    A["_tail_page"] = B["page"]
+    if B.get("table_bbox"):
+        A["_tail_bottom"] = B["table_bbox"][3]
+    A["_tail_page_h"] = B.get("page_h")
+
+
+def _stitch_cross_page(results: List[Dict]) -> List[Dict]:
+    """扫完所有页表后的拼接 pass：把被按页/页内切碎的同一张表合并回完整。"""
+    out: List[Dict] = []
+    for cur in results:
+        if out and _is_continuation(out[-1], cur):
+            _merge_into(out[-1], cur)
+        else:
+            out.append(dict(cur))
+    for it in out:                                           # 清掉内部链尾标记
+        for k in ("_tail_page", "_tail_bottom", "_tail_page_h"):
+            it.pop(k, None)
+    return out
+
+
 def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     """
     扫描 PDF 正文页，提取所有表格，每张表附带页码、章节上下文与单元格坐标(溯源用)。
@@ -221,9 +289,10 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
                     "section": section,
                     "cell_bbox": cell_bbox,
                     "table_bbox": tbb,
+                    "page_h": float(getattr(page, "height", 0) or 0),
                 })
 
-    return results
+    return _stitch_cross_page(results)
 
 
 # ── 表格类型特征配置 ──
