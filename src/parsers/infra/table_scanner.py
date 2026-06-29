@@ -14,8 +14,14 @@
 """
 
 from typing import List, Dict, Optional
+import re
 import pdfplumber
 import fitz
+
+
+def _looks_like_toc(text: str) -> bool:
+    """目录页特征：多条"标题……页码"点引线。目录列了所有章节名，会让子串章节扫描误触发，需跳过。"""
+    return len(re.findall(r"[.·。．…]{4,}", text)) >= 3
 
 # ── 章节上下文标记 ──
 
@@ -28,21 +34,17 @@ SECTION_OTHER = "other"         # 其它（封面、目录等）
 # 扫描安全上限：章节驱动扫描时防极端长 PDF 跑飞(正常年报≤300页,不会触及)
 _SCAN_HARD_CAP = 350
 
-# 章节切换关键词（按优先级排序）
+# 章节切换标记 —— 要求"第X节 标题"的**章节标题**形态(不是正文里顺嘴提的关键词)。
+# 否则正文"完善公司治理结构"会把后面误标成 gov(000333 page48 踩过)。
+_CN_NUM = "一二三四五六七八九十"
 _SECTION_MARKERS = [
-    # 附注开始标记
-    ("财务报表附注", SECTION_FUZHU),
-    ("财务报告附注", SECTION_FUZHU),
-    ("会计报表附注", SECTION_FUZHU),
-    # 管理层讨论开始标记
-    ("管理层讨论与分析", SECTION_MGMT),
-    ("经营情况讨论与分析", SECTION_MGMT),
-    ("董事会报告", SECTION_MGMT),
-    # 公司治理(第四节) —— 员工情况在此
-    ("公司治理", SECTION_GOV),
-    # 附注结束标记（回到其它）—— "董事、监事"已删:它本是公司治理(gov)内容,会误翻章节
-    ("公司代码", SECTION_OTHER),
-    ("备查文件", SECTION_OTHER),
+    (re.compile(rf"第[{_CN_NUM}]+节\s*管理层讨论与分析"), SECTION_MGMT),
+    (re.compile(rf"第[{_CN_NUM}]+节\s*经营情况讨论与分析"), SECTION_MGMT),
+    (re.compile(rf"第[{_CN_NUM}]+节\s*董事会报告"), SECTION_MGMT),
+    (re.compile(rf"第[{_CN_NUM}]+节\s*公司治理"), SECTION_GOV),         # 第四节 —— 员工情况在此
+    (re.compile(rf"第[{_CN_NUM}]+节\s*财务报[告表]"), SECTION_FUZHU),
+    (re.compile(r"财务报表附注|会计报表附注"), SECTION_FUZHU),          # 附注标题(够具体,不必第X节)
+    (re.compile(rf"第[{_CN_NUM}]+节\s*备查文件"), SECTION_OTHER),
 ]
 
 # PDF 大纲(书签)章节标记 —— 权威结构，优先于全文子串扫描
@@ -110,11 +112,12 @@ def detect_page_context(pdf_path: str) -> Dict[int, str]:
     for pn in range(len(doc)):
         text = doc[pn].get_text("text")
 
-        # 检测章节切换
-        for marker, section_type in _SECTION_MARKERS:
-            if marker in text:
-                current_section = section_type
-                break
+        # 检测章节切换（跳过目录页；用"第X节 标题"正则，避开正文里顺嘴提的关键词）
+        if not _looks_like_toc(text):
+            for marker, section_type in _SECTION_MARKERS:
+                if marker.search(text):
+                    current_section = section_type
+                    break
 
         context[pn + 1] = current_section
 
