@@ -21,7 +21,8 @@ import fitz
 
 # 章节类型
 SECTION_FUZHU = "fuzhu"        # 财务报表附注
-SECTION_MGMT = "management"     # 管理层讨论与分析
+SECTION_MGMT = "management"     # 管理层讨论与分析(第三节)
+SECTION_GOV = "gov"            # 公司治理(第四节) —— 员工情况/专业构成/教育程度在这里(准则第三十四条)
 SECTION_OTHER = "other"         # 其它（封面、目录等）
 
 # 扫描安全上限：章节驱动扫描时防极端长 PDF 跑飞(正常年报≤300页,不会触及)
@@ -37,10 +38,11 @@ _SECTION_MARKERS = [
     ("管理层讨论与分析", SECTION_MGMT),
     ("经营情况讨论与分析", SECTION_MGMT),
     ("董事会报告", SECTION_MGMT),
-    # 附注结束标记（回到其它）
+    # 公司治理(第四节) —— 员工情况在此
+    ("公司治理", SECTION_GOV),
+    # 附注结束标记（回到其它）—— "董事、监事"已删:它本是公司治理(gov)内容,会误翻章节
     ("公司代码", SECTION_OTHER),
     ("备查文件", SECTION_OTHER),
-    ("董事、监事", SECTION_OTHER),
 ]
 
 # PDF 大纲(书签)章节标记 —— 权威结构，优先于全文子串扫描
@@ -48,6 +50,7 @@ _TOC_MARKERS = [
     ("管理层讨论与分析", SECTION_MGMT),
     ("经营情况讨论与分析", SECTION_MGMT),
     ("董事会报告", SECTION_MGMT),
+    ("公司治理", SECTION_GOV),                # 第四节 —— 员工情况(准则第三十四条)
     ("财务报告", SECTION_FUZHU),
     ("财务报表", SECTION_FUZHU),
     ("备查文件", SECTION_OTHER),
@@ -185,7 +188,7 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
             reliable = False
         if reliable:
             pages_to_scan = [pn for pn in range(1, npages + 1)
-                             if page_context.get(pn) in (SECTION_MGMT, SECTION_FUZHU)
+                             if page_context.get(pn) in (SECTION_MGMT, SECTION_GOV, SECTION_FUZHU)
                              and pn <= _SCAN_HARD_CAP]
         else:
             pages_to_scan = list(range(16, min(npages, _SCAN_HARD_CAP) + 1))
@@ -231,7 +234,7 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
 SECTION_ALLOWED = {
     "revenue": [SECTION_FUZHU, SECTION_MGMT],
     "rnd": [SECTION_FUZHU, SECTION_MGMT],
-    "employee": [SECTION_FUZHU, SECTION_MGMT],
+    "employee": [SECTION_GOV, SECTION_MGMT],   # 员工在第四节公司治理(准则第三十四条)
     "cost": [SECTION_FUZHU, SECTION_MGMT],
     "supplier": [SECTION_FUZHU, SECTION_MGMT],
 }
