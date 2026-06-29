@@ -203,11 +203,24 @@ def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict
             continue
         bd["preview"] = [[(c or "").replace("\n", " ").strip()[:14] for c in row]
                          for row in (it["table"] or [])[:10]]
+        bd["table_bbox"] = it.get("table_bbox")     # 给前端在PDF原页上高亮表位置
         cands.append(bd)
     cands.sort(key=lambda x: -x["total"])
     anchor = (get_anchors(code, year) or {}).get(_DBG_ANCHOR.get(field))
     return {"code": code, "year": year, "field": field, "sig": sig,
             "anchor": anchor, "total_tables": len(tables), "candidates": cands}
+
+
+def render_page(code: str, year: int, page: int) -> Dict:
+    """渲染某报告某页为 base64 PNG（选表调试台"看PDF原页"用）。"""
+    pdf = _pdf_path(code, year)
+    if not pdf:
+        return {"error": "无 PDF"}
+    try:
+        img, w, h = _render_page_b64(pdf, page)
+        return {"page": page, "page_image": img, "page_w_pt": w, "page_h_pt": h}
+    except Exception as e:
+        return {"error": str(e)[:100]}
 
 
 # ── 人在回路写回：确认真值→golden，认证解析器→目录 ──

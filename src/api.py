@@ -420,6 +420,13 @@ def debug_select(stock_code: str, year: int = 2025, field: str = "revenue_breakd
     return select_debug(stock_code, year, field)
 
 
+@app.get("/debug/page")
+def debug_page(stock_code: str, year: int = 2025, page: int = 1):
+    """渲染某页为图片（选表调试台"看PDF原页"）。"""
+    from src.console_service import render_page
+    return render_page(stock_code, year, page)
+
+
 class GoldenRequest(BaseModel):
     stock_code: str
     year: int = 2025
