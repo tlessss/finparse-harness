@@ -27,12 +27,29 @@ class RevenueParser(BaseParser):
         sec = (self.rule or {}).get("revenue_section", {}) or {}
         return set(sec.get("extra_exclude_names", []) or [])
 
+    # 代码兜底的切桶标记（YAML 缺失/读不到时用）。正常以 revenue.yaml 的 dimensions 为准。
+    _FALLBACK_DIMENSIONS = {
+        "分行业": "industries", "按行业": "industries",
+        "分产品": "segments", "按产品": "segments",
+        "分地区": "regions", "按地区": "regions",
+        "分销售模式": "by_channel", "分销售渠道": "by_channel",
+        "销售模式": "by_channel", "按销售模式": "by_channel",
+        "销售渠道": "by_channel", "按销售渠道": "by_channel",
+    }
+
     def _header_aliases(self) -> Optional[dict]:
         """加载规范驱动的表头别名（revenue.yaml）；缺失则返回 None 走旧统计法。"""
         rule = load_rule("revenue")
         if not rule:
             return None
         return rule.get("revenue_breakdown", {}).get("header_aliases")
+
+    def _section_labels(self) -> dict:
+        """切桶标记：以 revenue.yaml 的 dimensions 为准，代码 _FALLBACK_DIMENSIONS 补缺/兜底。
+        这是自愈"改规则"的落点——往 YAML 的 dimensions 加一条，这里立即生效，无需改代码。"""
+        rule = load_rule("revenue")
+        yaml_dims = (rule or {}).get("revenue_breakdown", {}).get("dimensions") or {}
+        return {**self._FALLBACK_DIMENSIONS, **yaml_dims}    # YAML 覆盖/新增，代码兜底
 
     def _resolve_columns(self, table: list):
         """
@@ -311,16 +328,8 @@ class RevenueParser(BaseParser):
         return name_col, amount_col, ratio_col
 
     def _classify(self, table: list, unit_ratio: int = 1) -> Dict:
-        # 切桶标记：含常见变体。坑——有的报告写"销售模式"(无"分"),不补上则 直销/经销
-        # 漏进上一桶(regions),导致 regions 翻倍(赛力斯601127踩过)。
-        section_labels = {
-            "分行业": "industries", "按行业": "industries",
-            "分产品": "segments", "按产品": "segments",
-            "分地区": "regions", "按地区": "regions",
-            "分销售模式": "by_channel", "分销售渠道": "by_channel",
-            "销售模式": "by_channel", "按销售模式": "by_channel",
-            "销售渠道": "by_channel", "按销售渠道": "by_channel",
-        }
+        # 切桶标记从 revenue.yaml 的 dimensions 读(自愈"改规则"的旋钮);代码兜底防 YAML 缺失。
+        section_labels = self._section_labels()
         sections = []
         for row in table:
             found = None

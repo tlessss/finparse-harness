@@ -35,13 +35,22 @@ revenue_breakdown:
     cost:    ["营业成本"]
     gross:   ["毛利率"]
 
-  # ④ 维度锚点（含准则新增的"销售模式"）
+  # ④ 维度锚点（切桶标记 → 维度）。这是自愈"改规则"的主要旋钮：
+  #    加一种报告写法,往这里加一条即可(parser 直接读 YAML,无需改代码)。
+  #    坑:有的报告写"销售模式"(无"分"),漏了会让 直销/经销 串进上一桶(regions翻倍,赛力斯601127踩过)。
   dimensions:
     分行业: industries
+    按行业: industries
     分产品: segments
+    按产品: segments
     分地区: regions
+    按地区: regions
     分销售模式: by_channel
     分销售渠道: by_channel
+    销售模式: by_channel
+    按销售模式: by_channel
+    销售渠道: by_channel
+    按销售渠道: by_channel
 
   # ⑤ 需剔除的行（合计/小计混入会让占比之和翻倍）
   exclude_rows: ["合计", "小计", "总计", "其中"]
