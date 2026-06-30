@@ -434,6 +434,13 @@ def debug_route(stock_code: str, year: int = 2025, field: str = "revenue_breakdo
     return route_debug(stock_code, year, field)
 
 
+@app.get("/debug/parse")
+def debug_parse(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """冷启动解析测试台：强制跑通用解析器(绕过路由)→各维度对锚。"""
+    from src.console_service import parse_debug
+    return parse_debug(stock_code, year, field)
+
+
 # ── 测试阶段数据库(SQLite) ──
 
 @app.get("/test/list")

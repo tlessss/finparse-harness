@@ -265,6 +265,48 @@ def route_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     }
 
 
+def parse_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """冷启动解析测试台：强制跑通用(冷启动)解析器(绕过路由) → 各维度对锚，看路由未命中时冷启动行不行。"""
+    from src.engine_orchestrator import FinParseAI
+    from src.eval.field_spec import get_spec
+    from src.parsers.revenue_router import field_plausibility
+    from src.eval.anchors import get_anchors
+    pdf = _pdf_path(code, year)
+    if not pdf:
+        return {"error": "无 PDF"}
+    if get_tables(code, year) is None:
+        return {"error": "无缓存（先解析一次该报告）"}
+    spec = get_spec(field)
+    parser = FinParseAI()._get_parser(field, pdf)
+    try:
+        out = parser.parse(pdf, pre_scan=get_tables(code, year))
+    except Exception as e:
+        return {"error": "冷启动解析异常: " + str(e)[:120], "parser": type(parser).__name__}
+    data = out.get(field)
+    anchors = get_anchors(code, year)
+    sig = field_plausibility(spec, data, anchors)
+    anchor = (anchors or {}).get(_DBG_ANCHOR.get(field))
+    amt = getattr(spec, "amount_key", "revenue_yuan")
+    dims = []
+    rows_of = (data.items() if isinstance(data, dict) else [("明细", data)] if isinstance(data, list) else [])
+    for k, rows in rows_of:
+        if isinstance(rows, list) and rows:
+            s = sum((r.get(amt) or 0) for r in rows if isinstance(r, dict))
+            dims.append({"dim": k, "n": len(rows), "sum": s,
+                         "match": bool(anchor and s and abs(s - anchor) <= 0.03 * anchor)})
+    try:
+        from src.eval.test_store import save_test
+        save_test("parse", code, year, field, status=out.get("status"), confidence=sig.get("confidence"),
+                  summary={"parser": type(parser).__name__, "dims": {d["dim"]: d["n"] for d in dims},
+                           "anchored": sig.get("anchored")}, payload={"dims": dims})
+    except Exception:
+        pass
+    return {"code": code, "year": year, "field": field, "parser": type(parser).__name__,
+            "status": out.get("status"), "anchor": anchor,
+            "confidence": sig.get("confidence"), "anchored": sig.get("anchored"),
+            "dims": dims, "result": data}
+
+
 def render_page(code: str, year: int, page: int) -> Dict:
     """渲染某报告某页为 base64 PNG（选表调试台"看PDF原页"用）。页码越界返回 error。"""
     pdf = _pdf_path(code, year)
