@@ -448,11 +448,32 @@ def debug_judge(stock_code: str, year: int = 2025, field: str = "revenue_breakdo
     return judge_debug(stock_code, year, field)
 
 
+class JudgeChatRequest(BaseModel):
+    code: str
+    year: int = 2025
+    field: str = "revenue_breakdown"
+    messages: list
+
+
 @app.get("/debug/heal")
 def debug_heal(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
     """自愈测试台(真失败筛子)：判这份要不要自愈 + 病历/修复方向。"""
     from src.console_service import heal_debug
     return heal_debug(stock_code, year, field)
+
+
+@app.get("/debug/heal/prepare")
+def debug_heal_prepare(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """自愈对话台：拼调试包(病历+原表+错值+配置+代码)给AI,返回可编辑messages。"""
+    from src.console_service import heal_prepare
+    return heal_prepare(stock_code, year, field)
+
+
+@app.post("/debug/heal/chat")
+def debug_heal_chat(req: JudgeChatRequest):
+    """自愈对话：发送messages给AI,记录,返回修复建议。"""
+    from src.console_service import heal_chat
+    return heal_chat(req.code, req.year, req.field, req.messages)
 
 
 @app.get("/debug/columns")
@@ -467,13 +488,6 @@ def debug_judge_prepare(stock_code: str, year: int = 2025, field: str = "revenue
     """对话台：拼好发给LLM的messages但不发送,返给前端编辑。"""
     from src.console_service import judge_prepare
     return judge_prepare(stock_code, year, field)
-
-
-class JudgeChatRequest(BaseModel):
-    code: str
-    year: int = 2025
-    field: str = "revenue_breakdown"
-    messages: list
 
 
 @app.post("/debug/judge/chat")

@@ -420,6 +420,70 @@ def heal_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             "verdict": verdict, "reason": reason, "need_heal": need, "fix_hint": fix_hint}
 
 
+def heal_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """自愈对话台：拼一个"调试包"给 AI —— 病历 + 失败案例(原表/错值/锚) + 当前配置 + 相关解析器代码,
+    让它定位根因、提最小修复(优先改配置/规则)。返回可编辑 messages。不发送。"""
+    import inspect
+    from src.engine_orchestrator import FinParseAI
+    from src.parsers.infra.table_scanner import filter_by_signature
+    diag = heal_debug(code, year, field)
+    if diag.get("error"):
+        return diag
+    tables = get_tables(code, year) or []
+    sel = filter_by_signature(tables, _DBG_SIG.get(field, "revenue"))
+    table = (sel[0].get("table") if sel else []) or []
+    table_text = "\n".join(" | ".join((c or "") for c in row) for row in table[:30])
+    pdf = _pdf_path(code, year)
+    parser = FinParseAI()._get_parser(field, pdf)
+    try:
+        value = parser.parse(pdf, pre_scan=tables).get(field)
+    except Exception:
+        value = None
+    try:
+        config = open("src/parser_rules/revenue.yaml", encoding="utf-8").read()
+    except Exception:
+        config = "(读不到 revenue.yaml)"
+    code_src = ""
+    for m in ("_detect_columns", "_resolve_columns", "_classify"):
+        fn = getattr(parser, m, None)
+        if fn:
+            try:
+                code_src += inspect.getsource(fn) + "\n"
+            except Exception:
+                pass
+    dims_txt = "  ".join(f"{d['dim']}={d['sum']/1e8:.0f}亿({'过锚' if d['match'] else '✗'})" for d in diag.get("dims", []))
+    anchor = diag.get("anchor")
+    sys_msg = ("你是资深的 A 股财报解析器开发者。下面给你：病历 + 失败案例(原表/解析出的错值/锚) + 当前配置 + 相关解析器代码。"
+               "请定位 bug 的根因(具体到哪条配置或哪行代码)，并提出**最小修复**。"
+               "优先回答：能不能只加/改一条配置或规则解决？给出具体改动。实在不行才改代码。")
+    user = (
+        f"## 病历（确定性诊断）\n判定：{diag.get('verdict')}；理由：{diag.get('reason')}\n"
+        f"各维度分项和：{dims_txt}\n锚(营业收入)：{anchor/1e8:.2f}亿\n\n"
+        f"## 失败案例\n字段：{field}\n选中的原表（前30行）：\n{table_text}\n\n"
+        f"解析出的值：\n{json.dumps(value, ensure_ascii=False, indent=2)[:2500]}\n\n"
+        f"## 当前配置 src/parser_rules/revenue.yaml\n{config}\n\n"
+        f"## 相关解析器代码（认列/切桶）\n```python\n{code_src[:4000]}\n```\n\n"
+        f"## 任务\n1) bug 根因在哪（指到具体配置项/代码行）？\n2) 最小修复是什么（优先：加/改哪条配置或规则）？给出能直接用的具体改动。"
+    )
+    return {"code": code, "year": year, "field": field, "diag": diag,
+            "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": user}]}
+
+
+def heal_chat(code: str, year: int, field: str, messages: list) -> Dict:
+    """自愈对话：把(可编辑过的) messages 发给 AI,记录,返回修复建议。"""
+    from src.agents.llm_client import chat
+    try:
+        reply = chat(messages, role="judge", temperature=0.3)
+    except Exception as e:
+        return {"error": "LLM 调用异常: " + str(e)[:120]}
+    try:
+        from src.eval.test_store import save_chat
+        save_chat(code, year, field + "|heal", messages, reply)
+    except Exception:
+        pass
+    return {"reply": reply}
+
+
 def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     """认列测试台：选中表 → 解析器怎么判 名称列/金额列/占比列(内容法 + 表头法 + 最终)。"""
     from src.engine_orchestrator import FinParseAI
