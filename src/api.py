@@ -489,6 +489,20 @@ def tool_add_section_marker(req: AddMarkerRequest):
     return add_section_marker(req.text, req.dim, req.field)
 
 
+class ApplyFixRequest(BaseModel):
+    code: str
+    year: int = 2025
+    field: str = "revenue_breakdown"
+    fix: dict
+
+
+@app.post("/tool/apply_fix")
+def tool_apply_fix(req: ApplyFixRequest):
+    """应用 AI 的结构化修复 + 回链重测，返回修复前后对照。"""
+    from src.console_service import apply_fix
+    return apply_fix(req.code, req.year, req.field, req.fix)
+
+
 @app.get("/debug/columns")
 def debug_columns(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
     """认列测试台：选中表怎么判 名称/金额/占比列。"""

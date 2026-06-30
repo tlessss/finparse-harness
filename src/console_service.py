@@ -463,14 +463,33 @@ def heal_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict
         f"解析出的值：\n{json.dumps(value, ensure_ascii=False, indent=2)[:2500]}\n\n"
         f"## 当前配置 src/parser_rules/revenue.yaml\n{config}\n\n"
         f"## 相关解析器代码（认列/切桶）\n```python\n{code_src[:4000]}\n```\n\n"
-        f"## 任务\n1) bug 根因在哪（指到具体配置项/代码行）？\n2) 最小修复是什么（优先：加/改哪条配置或规则）？给出能直接用的具体改动。"
+        f"## 任务\n1) bug 根因在哪（指到具体配置项/代码行）？\n"
+        f"2) 最小修复是什么（优先：加/改哪条配置或规则）？\n"
+        f"3) 如果修复就是'给 dimensions 加一个切桶标记'，**最后**用一个 json 代码块给出可执行修复：\n"
+        f'```json\n{{"tool": "add_section_marker", "text": "报告里没被识别的表头写法", "dim": "industries|segments|regions|by_channel"}}\n```\n'
+        f'如果不是这类规则修复（要改代码/别的），给 {{"tool": "none"}}。'
     )
     return {"code": code, "year": year, "field": field, "diag": diag,
             "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": user}]}
 
 
+def _extract_fix(reply: str):
+    """从 AI 回复里抠出结构化修复 {tool,...}（json 代码块优先）。none/抠不到→返回 None。"""
+    import re
+    blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", reply, re.DOTALL)
+    blocks += re.findall(r'(\{[^{}]*"tool"[^{}]*\})', reply, re.DOTALL)
+    for b in blocks:
+        try:
+            d = json.loads(b)
+        except Exception:
+            continue
+        if isinstance(d, dict) and d.get("tool") and d.get("tool") != "none":
+            return d
+    return None
+
+
 def heal_chat(code: str, year: int, field: str, messages: list) -> Dict:
-    """自愈对话：把(可编辑过的) messages 发给 AI,记录,返回修复建议。"""
+    """自愈对话：把(可编辑过的) messages 发给 AI,记录,返回修复建议 + 解析出的结构化修复 fix。"""
     from src.agents.llm_client import chat
     try:
         reply = chat(messages, role="judge", temperature=0.3)
@@ -481,7 +500,24 @@ def heal_chat(code: str, year: int, field: str, messages: list) -> Dict:
         save_chat(code, year, field + "|heal", messages, reply)
     except Exception:
         pass
-    return {"reply": reply}
+    return {"reply": reply, "fix": _extract_fix(reply)}
+
+
+def apply_fix(code: str, year: int, field: str, fix: dict) -> Dict:
+    """应用 AI 给的结构化修复(目前支持 add_section_marker) → 回链重测,返回 修复前后对照。"""
+    from src.agents.rule_tools import add_section_marker
+    tool = (fix or {}).get("tool")
+    before = heal_debug(code, year, field)
+    if tool == "add_section_marker":
+        r = add_section_marker(fix.get("text"), fix.get("dim"), field="revenue")
+    else:
+        return {"ok": False, "message": f"暂不支持的工具：{tool}（本期只接了 add_section_marker）"}
+    after = heal_debug(code, year, field)
+    fixed = bool(r.get("ok") and before.get("need_heal") and not after.get("need_heal"))
+    return {"ok": bool(r.get("ok")), "apply": r,
+            "before": {"verdict": before.get("verdict"), "need_heal": before.get("need_heal"), "dims": before.get("dims")},
+            "after": {"verdict": after.get("verdict"), "need_heal": after.get("need_heal"), "dims": after.get("dims")},
+            "fixed": fixed}
 
 
 def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
