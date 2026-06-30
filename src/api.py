@@ -448,6 +448,13 @@ def debug_judge(stock_code: str, year: int = 2025, field: str = "revenue_breakdo
     return judge_debug(stock_code, year, field)
 
 
+@app.get("/debug/columns")
+def debug_columns(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """认列测试台：选中表怎么判 名称/金额/占比列。"""
+    from src.console_service import columns_debug
+    return columns_debug(stock_code, year, field)
+
+
 @app.get("/debug/judge/prepare")
 def debug_judge_prepare(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
     """对话台：拼好发给LLM的messages但不发送,返给前端编辑。"""

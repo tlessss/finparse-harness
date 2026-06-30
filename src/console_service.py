@@ -371,6 +371,41 @@ def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             "system": v.get("_system"), "prompt": v.get("_prompt"), "raw": v.get("_raw")}
 
 
+def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """认列测试台：选中表 → 解析器怎么判 名称列/金额列/占比列(内容法 + 表头法 + 最终)。"""
+    from src.engine_orchestrator import FinParseAI
+    from src.parsers.infra.table_scanner import filter_by_signature
+    tables = get_tables(code, year)
+    if not tables:
+        return {"error": "无缓存（先解析一次该报告）"}
+    sel = filter_by_signature(tables, _DBG_SIG.get(field, "revenue"))
+    if not sel:
+        return {"error": "没选到目标表"}
+    table = sel[0].get("table") or []
+    pdf = _pdf_path(code, year)
+    p = FinParseAI()._get_parser(field, pdf)
+    out = {"code": code, "year": year, "field": field,
+           "page": sel[0].get("page"),
+           "table": [[(c or "") for c in row] for row in table[:30]],
+           "n_cols": max((len(r) for r in table), default=0)}
+    try:
+        if hasattr(p, "_detect_columns"):
+            cn, ca, cr = p._detect_columns(table)
+            out["content_method"] = {"name": cn, "amount": ca, "ratio": cr}
+        if hasattr(p, "_resolve_columns"):
+            aliases = p._header_aliases() if hasattr(p, "_header_aliases") else None
+            out["has_yaml_rule"] = bool(aliases)
+            if aliases:
+                from src.parsers.infra.header_columns import detect_columns_by_header
+                hdr = detect_columns_by_header(table, aliases)
+                out["header_method"] = {"name": hdr.get("name"), "amount": hdr.get("revenue"), "ratio": hdr.get("ratio")}
+            fn, fa, fr = p._resolve_columns(table)
+            out["final"] = {"name": fn, "amount": fa, "ratio": fr}
+    except Exception as e:
+        out["warn"] = "认列异常: " + str(e)[:100]
+    return out
+
+
 def judge_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     """对话台：解析该字段 → 拼好发给 LLM 的 messages(system+user) 但**不发送**,返给前端编辑。"""
     from src.engine_orchestrator import FinParseAI
