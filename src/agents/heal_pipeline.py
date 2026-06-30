@@ -41,6 +41,7 @@ def heal_field(spec, code: str, year: int, golden_entry: Optional[Dict] = None,
 
     # ① 路由：选择即验证命中已认证解析器就直接用
     route = route_field(spec, code, year)
+    
     if route["status"] == "routed":
         log(f"  {code}/{spec.label}: ✅routed → {route['parser_key']}")
         if (route.get("signal") or {}).get("confidence") != "low":   # 低置信仍留队列待复核

@@ -91,6 +91,9 @@ def _parse_one(task: dict) -> dict:
 
 
 def discover(year: int, limit: int) -> list:
+    """扫缓存目录，按 stock_code 去重、筛年份，列出要跑的报告。
+    入参：year:int 只要这年；limit:int 最多几份(0=全量)。
+    返回：list[{"stock_code","year","pdf_path"}]。"""
     cache = Config.PDF_CACHE_DIR
     seen, out = set(), []
     if not cache.exists():
@@ -98,11 +101,11 @@ def discover(year: int, limit: int) -> list:
     for f in sorted(cache.iterdir()):
         if f.suffix != ".pdf":
             continue
-        parts = f.stem.split("_")
+        parts = f.stem.split("_")     # 文件名形如 002407_2025[_hash].pdf
         if len(parts) < 2 or not (parts[1].isdigit() and len(parts[1]) == 4):
             continue
         code, yr = parts[0], int(parts[1])
-        if yr != year or code in seen:
+        if yr != year or code in seen:     # 不是目标年/已见过同代码 → 跳过(去重)
             continue
         seen.add(code)
         out.append({"stock_code": code, "year": yr, "pdf_path": str(f)})
@@ -110,6 +113,7 @@ def discover(year: int, limit: int) -> list:
 
 
 def _load_done(jsonl_path: str) -> set:
+    """断点续跑：从已有结果文件里读出"已完成的 stock_code"集合，下次跳过它们。"""
     done = set()
     if os.path.exists(jsonl_path):
         with open(jsonl_path, encoding="utf-8") as f:
@@ -122,15 +126,21 @@ def _load_done(jsonl_path: str) -> set:
 
 
 def run(year=2025, limit=0, workers=6, timeout=180, state_dir=None):
+    """
+    全自主跑批主函数。
+    入参：year 年份；limit 份数(0=全量)；workers 并发进程数；timeout 单份硬超时秒；
+          state_dir 结果目录(默认 run_state/<year>)。
+    产物：state_dir/results.jsonl(全部结果) + deadletter.jsonl(红线/报错/超时的难例)。
+    """
     if state_dir is None:
         state_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                  "run_state", str(year))
     os.makedirs(state_dir, exist_ok=True)
-    jsonl = os.path.join(state_dir, "results.jsonl")
-    deadletter = os.path.join(state_dir, "deadletter.jsonl")
+    jsonl = os.path.join(state_dir, "results.jsonl")        # 所有结果(逐行追加)
+    deadletter = os.path.join(state_dir, "deadletter.jsonl") # 难例(red/error/timeout)
 
     all_tasks = discover(year, limit)
-    done = _load_done(jsonl)
+    done = _load_done(jsonl)                                 # 已完成的(续跑跳过)
     todo = [t for t in all_tasks if t["stock_code"] not in done]
     for t in todo:
         t["timeout"] = timeout

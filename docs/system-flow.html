@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>FinParseAI 系统全流程</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1419;color:#e5e7eb;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{padding:24px 32px 4px}header h1{margin:0;font-size:22px}header p{margin:6px 0 0;color:#9ca3af;font-size:13px}
+  #legend{display:flex;gap:16px;flex-wrap:wrap;padding:10px 32px;font-size:12px;color:#9ca3af}
+  #legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .wrap{display:flex;gap:20px;padding:8px 32px 40px;align-items:flex-start}
+  .diagram{flex:1 1 auto;min-width:0;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:8px}
+  svg{width:100%;height:auto;display:block}
+  .panel{flex:0 0 340px;position:sticky;top:16px;background:#161b22;border:1px solid #21262d;border-radius:12px;padding:18px;min-height:280px;max-height:90vh;overflow-y:auto}
+  .panel h3{margin:0 0 4px;font-size:16px}
+  .panel .file{font-family:ui-monospace,monospace;font-size:12px;color:#58a6ff;word-break:break-all}
+  .panel .what{margin:12px 0;font-size:13.5px;line-height:1.6;color:#d1d5db}
+  .panel ul{margin:8px 0;padding-left:18px;font-size:12.5px;line-height:1.7;color:#b9c0c8}
+  .panel .data{margin-top:12px;padding:8px 10px;background:#0d1117;border-radius:8px;font-size:12px;color:#8b949e}
+  .panel .hint{color:#6b7280;font-size:12px;line-height:1.7}
+  .node{cursor:pointer}
+  .node rect{transition:filter .15s,stroke-width .15s}
+  .node:hover rect{filter:brightness(1.25)}
+  .node.active rect{stroke-width:3}
+  .node text{pointer-events:none}
+  .lbl{fill:#e5e7eb;font-size:13px;font-weight:600}
+  .sub{fill:#cbd5e1;font-size:10.5px}
+  .edgelbl{fill:#94a3b8;font-size:10px}
+  .note{padding:0 32px 24px;color:#9ca3af;font-size:12px;line-height:1.7}
+  .note code{background:#21262d;padding:1px 5px;border-radius:4px;font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <p id="subtitle"></p>
+</header>
+<div id="legend"></div>
+<div class="wrap">
+  <div class="diagram"><svg id="svg"></svg></div>
+  <div class="panel" id="panel"><div class="hint">👈 点击任意节点查看文件路径、职责与要点。<br><br>橙色 = 构建期（LLM 写代码）；青色 = 运行期（零 LLM）。</div></div>
+</div>
+<p class="note">入口：<code>batch_runner.run_batch</code> / <code>FinParseAI.run</code> / 控制台 API。<br>核心哲学：<strong>运行期跑冻结 Python</strong>；<strong>构建期 LLM 写解析器 + exact 闸门验收</strong>；<strong>选择即验证</strong>不预测、只验证。</p>
+
+<script>
+const META = {
+  title: "FinParseAI · 系统全流程",
+  subtitle: "一份 PDF 从抽表 → 6 字段解析 → 分诊队列 →（有问题时）自愈写码认证 → 下次自动路由",
+};
+
+const GROUPS = {
+  input:   { color: "#1f6feb", label: "输入" },
+  runtime: { color: "#0891b2", label: "运行期（零 LLM）" },
+  route:   { color: "#7c3aed", label: "路由 / 验证" },
+  build:   { color: "#b45309", label: "构建期（LLM 写码）" },
+  state:   { color: "#15803d", label: "输出 / 持久状态" },
+  human:   { color: "#8b5cf6", label: "人在回路" },
+};
+
+const NODES = [
+  { id: "pdf", row: 0, group: "input", label: "① PDF 年报", sub: "batch / API / 控制台",
+    detail: { file: "src/batch_runner.py", what: "批量或单份报告的输入源。PDF 缓存在 Config.PDF_CACHE_DIR。",
+      points: ["batch_runner 遍历股票代码列表", "也可直接调 FinParseAI().run(pdf)", "控制台通过 API 触发"] } },
+
+  { id: "scan", row: 1, group: "runtime", label: "② scan_pdf 抽表", sub: "只做一次，6 字段共用",
+    detail: { file: "src/parsers/infra/table_scanner.py", what: "把整份 PDF 所有表格抽成结构化网格（page/table/cell_bbox/section）。",
+      points: ["最贵的一步，批处理用 pre_scan 避免重复扫", "结果写入 goldset/tables_cache/", "下游全部读缓存表，不再碰 PDF"] } },
+
+  { id: "cache", row: 2, group: "state", label: "tables_cache", sub: "code+year → 全表",
+    detail: { file: "src/eval/table_cache.py", what: "抽表结果缓存。route_field / repair / LLM 抽 golden 都依赖它。",
+      data: "goldset/tables_cache/{code}_{year}.json" } },
+
+  { id: "engine", row: 3, group: "runtime", label: "③ FinParseAI.run", sub: "6 字段逐字段解析",
+    detail: { file: "src/engine_orchestrator.py", what: "编排主干：抽表 → 每字段先路由后冷启动 → 质检锚 → 组装 JSON → 可选写库。",
+      points: ["营收/成本/研发/员工/客户/供应商", "每字段：_route_field 优先", "未命中 → default.py 冷启动兜底"], data: "6 个 FieldSpec 字段" } },
+
+  { id: "route", row: 4, group: "route", label: "route_field", sub: "选择即验证", w: 260,
+    detail: { file: "src/parsers/revenue_router.py", what: "不预测用哪个解析器，把候选都跑一遍，硬规则选最优。",
+      points: ["① 指纹缓存快路径 route_get", "② candidates_for 缩候选逐个跑", "③ field_plausibility 判 clean → routed", "都不干净 → needs_repair"] } },
+
+  { id: "cold", row: 4, group: "runtime", label: "冷启动兜底", sub: "parsers/*/default.py", w: 220,
+    detail: { file: "src/parsers/selector.py", what: "路由没命中时的通用启发式解析器。有总比没有强，但准确率低。",
+      points: ["select_parser 按 can_handle 评分选型", "全文盲扫，无版式专用逻辑", "输出标记 source=cold_start"] } },
+
+  { id: "plaus", row: 5, group: "route", label: "field_plausibility", sub: "硬规则 + DB 锚",
+    detail: { file: "src/parsers/revenue_router.py", what: "运行期判「解对没」的代理（无 golden 时）。A/B/C/D 四类勾稽判据。",
+      points: ["占比和≈100（营收/成本）", "明细和≈合计（研发）", "分项和=总数（员工）", "confidence=low → 不写库、送审"] } },
+
+  { id: "output", row: 6, group: "state", label: "④ 输出 JSON", sub: "值 + 溯源 + signals", w: 240,
+    detail: { file: "src/engine_orchestrator.py:155-297", what: "组装统一输出：各字段值、溯源 bbox、parse_flags、confidence。冷启动且锚判错则不写库。",
+      points: ["attach_provenance 反查 PDF 坐标", "db_write 可选写 financial_reports", "signals 记录 routed/cold_start"] } },
+
+  { id: "triage", row: 6, group: "state", label: "triage_report", sub: "分诊台账", w: 240,
+    detail: { file: "src/eval/triage_queue.py", what: "每份报告逐字段落台账：绿(ok) / 红(needs_write) / 橙(low_confidence)。",
+      points: ["goldset/triage_queue.json", "控制台看覆盖率大数字", "open 条目进入待办队列"], data: "reason: needs_write | low_confidence | needs_human" } },
+
+  { id: "open", row: 7, group: "human", label: "⑤ 有问题？", sub: "open / needs_write",
+    detail: { file: "src/eval/triage_queue.py:138", what: "路由 needs_repair → 红(无解析器)；routed 但低置信 → 橙。",
+      points: ["needs_write: 没有干净解析器", "low_confidence: 锚对不上", "needs_human: 修复失败或无 golden"] } },
+
+  { id: "golden", row: 8, group: "human", label: "golden 标准答案", sub: "认证期才有", w: 260,
+    detail: { file: "goldset/revenue_golden.json", what: "某报告某字段的真值。只有 confirmed 状态才参与 exact 验收。",
+      points: ["人工: POST /review/golden", "自动: auto_heal LLM 抽表 + 过 DB 锚", "无 golden → 不能自动认证"] } },
+
+  { id: "heal", row: 9, group: "build", label: "heal_field / auto_heal", sub: "自愈决策",
+    detail: { file: "src/agents/heal_pipeline.py", what: "路由 → 修复 → 认证 或 转人工，串成一条。batch heal=True 时调 auto_heal_field。",
+      points: ["已 routed 且高置信 → 跳过", "有 golden → repair", "无 golden → escalate 转人工"] } },
+
+  { id: "repair", row: 10, group: "build", label: "repair 三岔", sub: "reuse / fork / new", w: 240,
+    detail: { file: "src/agents/code_generator.py:189", what: "pick_mother 在已认证解析器里对 golden 挑最像母本，据分定路。",
+      points: ["母本 exact → reuse（不调 LLM）", "母本部分≥0.3 → fork", "都很差 → new 从零写"] } },
+
+  { id: "gen", row: 10, group: "build", label: "generate_parser", sub: "LLM 写码循环 ≤8 轮", w: 260,
+    detail: { file: "src/agents/code_generator.py:120", what: "规范驱动 prompt → LLM 出代码 → 沙箱跑 → 对 golden 打分 → exact 才收下。",
+      points: ["_build_contract 注入准则口径", "_feedback 不泄露 golden 数值", "N 轮不 exact → 转人工，不留半成品"], data: "终点恒 = exact" } },
+
+  { id: "certify", row: 11, group: "state", label: "certify 认证入目录", sub: "版式指纹绑定",
+    detail: { file: "src/eval/parser_catalog.py", what: "exact 的解析器写入 certified_parsers.json，并打上 fingerprint。",
+      points: ["route_set 写路由缓存", "tag_fingerprint 自学版式", "下次同版式 → 缓存快路径 routed"], data: "12 个 versions/*.py（实测）" } },
+
+  { id: "next", row: 12, group: "route", label: "⑥ 下次同版式", sub: "自动 routed ✅", w: 280,
+    detail: { file: "src/eval/route_index.py", what: "认证闭环写回：版式指纹 → 解析器路径。第二份同版式报告直接命中，连候选都不跑。",
+      points: ["版式漂移 → route_invalidate 失效重选", "选择即验证防张冠李戴", "构建期改代码，运行期零 LLM"] } },
+];
+
+const EDGES = [
+  { from: "pdf", to: "scan" },
+  { from: "scan", to: "cache" },
+  { from: "cache", to: "engine" },
+  { from: "engine", to: "route", label: "先路由" },
+  { from: "engine", to: "cold", label: "未命中" },
+  { from: "route", to: "plaus", label: "routed" },
+  { from: "cold", to: "plaus" },
+  { from: "plaus", to: "output" },
+  { from: "output", to: "triage" },
+  { from: "triage", to: "open", label: "红/橙" },
+  { from: "open", to: "golden" },
+  { from: "golden", to: "heal" },
+  { from: "heal", to: "repair" },
+  { from: "repair", to: "gen", label: "fork/new" },
+  { from: "gen", to: "certify", label: "exact" },
+  { from: "certify", to: "next", label: "入库" },
+  { from: "next", to: "route", label: "闭环：下次自动命中", dashed: true },
+];
+
+const W = 860, TOP = 28, ROW_GAP = 108, NODE_H = 58, NODE_W = 300, H_GAP = 22;
+const byId = {};
+NODES.forEach(n => byId[n.id] = n);
+const rows = {};
+NODES.forEach(n => { (rows[n.row] = rows[n.row] || []).push(n); });
+Object.keys(rows).forEach(rk => {
+  const arr = rows[rk];
+  const widths = arr.map(n => n.w || NODE_W);
+  const total = widths.reduce((a, b) => a + b, 0) + H_GAP * (arr.length - 1);
+  let x = (W - total) / 2;
+  arr.forEach((n, i) => {
+    n._w = widths[i]; n._h = n.h || NODE_H;
+    n._x = x; n._y = TOP + Number(n.row) * ROW_GAP;
+    n._cx = x + n._w / 2; n._cy = n._y + n._h / 2;
+    n._top = n._y; n._bot = n._y + n._h;
+    x += widths[i] + H_GAP;
+  });
+});
+const svgH = Math.max(...NODES.map(n => n._bot)) + 36;
+let _backIdx = 0;
+function edgePath(a, b) {
+  if (b.row > a.row) {
+    const my = (a._bot + b._top) / 2;
+    return `M${a._cx},${a._bot} C${a._cx},${my} ${b._cx},${my} ${b._cx},${b._top}`;
+  } else if (b.row === a.row) {
+    return `M${a._x + a._w},${a._cy} L${b._x},${b._cy}`;
+  } else {
+    const rx = W - 6 - (_backIdx++) * 16;
+    return `M${a._x + a._w},${a._cy} C${rx},${a._cy} ${rx},${b._cy} ${b._x + b._w},${b._cy}`;
+  }
+}
+function edgeLabelPos(a, b) {
+  if (b.row > a.row) return { x: (a._cx + b._cx) / 2 + 8, y: (a._bot + b._top) / 2 };
+  if (b.row === a.row) return { x: (a._x + a._w + b._x) / 2, y: a._cy - 4 };
+  return { x: W - 4, y: (a._cy + b._cy) / 2 };
+}
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+let svg = `<svg viewBox="0 0 ${W} ${svgH}" xmlns="http://www.w3.org/2000/svg"><defs>
+  <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#6b7280"/></marker>
+</defs>`;
+EDGES.forEach(e => {
+  const a = byId[e.from], b = byId[e.to];
+  if (!a || !b) return;
+  svg += `<path d="${edgePath(a, b)}" fill="none" stroke="#6b7280" stroke-width="1.6"`
+       + (e.dashed ? ` stroke-dasharray="5 4"` : ``) + ` marker-end="url(#arr)"/>`;
+  if (e.label) { const p = edgeLabelPos(a, b); svg += `<text class="edgelbl" x="${p.x}" y="${p.y}">${esc(e.label)}</text>`; }
+});
+NODES.forEach(n => {
+  const g = GROUPS[n.group] || { color: "#6b7280" };
+  svg += `<g class="node" data-key="${n.id}">`
+       + `<rect x="${n._x}" y="${n._y}" width="${n._w}" height="${n._h}" rx="10" fill="${g.color}" fill-opacity="0.14" stroke="${g.color}"/>`
+       + `<text class="lbl" x="${n._cx}" y="${n._top + (n.sub ? 22 : n._h / 2 + 5)}" text-anchor="middle">${esc(n.label)}</text>`;
+  if (n.sub) svg += `<text class="sub" x="${n._cx}" y="${n._top + 40}" text-anchor="middle">${esc(n.sub)}</text>`;
+  svg += `</g>`;
+});
+svg += `</svg>`;
+
+document.getElementById("title").textContent = META.title || "";
+document.getElementById("subtitle").textContent = META.subtitle || "";
+document.getElementById("svg").outerHTML = svg;
+document.getElementById("legend").innerHTML = Object.values(GROUPS)
+  .map(g => `<span><i class="dot" style="background:${g.color}"></i>${esc(g.label)}</span>`).join("");
+
+const panel = document.getElementById("panel");
+let activeEl = null;
+document.querySelectorAll(".node").forEach(el => {
+  el.addEventListener("click", () => {
+    if (activeEl) activeEl.classList.remove("active");
+    el.classList.add("active"); activeEl = el;
+    const n = byId[el.getAttribute("data-key")]; const d = (n && n.detail) || {};
+    panel.innerHTML = `<h3>${esc(n.label)}</h3>`
+      + (d.file ? `<div class="file">${esc(d.file)}</div>` : ``)
+      + (d.what ? `<div class="what">${esc(d.what)}</div>` : ``)
+      + (d.points && d.points.length ? `<ul>${d.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>` : ``)
+      + (d.data ? `<div class="data">📊 ${esc(d.data)}</div>` : ``);
+  });
+});
+</script>
+</body>
+</html>

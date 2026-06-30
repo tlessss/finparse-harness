@@ -27,3 +27,6 @@ python-multipart>=0.0.10
 # 配置
 python-dotenv>=1.0.0
 PyYAML>=6.0
+
+# 测试
+pytest>=8.0.0
