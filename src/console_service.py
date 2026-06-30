@@ -186,6 +186,28 @@ _DBG_SIG = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info"
 _DBG_ANCHOR = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd_expense"}
 
 
+def _field_unit_label(code: str, year: int, field: str):
+    """该字段所选表的金额单位标签(元/千元/万元/亿元),给 LLM 用。检不到返回 None。
+    单位标记('单位：千元')常在表格上方的页面文字里、不在表格单元格中 → 读 PDF 该页文字来检。"""
+    try:
+        import fitz
+        from src.parsers.infra.table_scanner import filter_by_signature
+        from src.parsers.infra.unit_detector import detect_unit
+        sel = filter_by_signature(get_tables(code, year) or [], _DBG_SIG.get(field, "revenue"))
+        pdf = _pdf_path(code, year)
+        if not sel or not pdf:
+            return None
+        page = sel[0].get("page")
+        if not page:
+            return None
+        doc = fitz.open(pdf)
+        text = doc[page - 1].get_text() if 0 < page <= len(doc) else ""
+        doc.close()
+        return {1: "元", 1000: "千元", 10000: "万元", 100000000: "亿元"}.get(detect_unit(text) or 1)
+    except Exception:
+        return None
+
+
 def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     """选表调试台：返回该字段所有相关候选表的 得分明细 + 淘汰原因 + 预览，供人工核对选表准不准。"""
     from src.parsers.infra.table_scanner import score_breakdown
@@ -332,7 +354,8 @@ def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     if isinstance(prov.get(field), dict):
         prov = prov[field]
     try:
-        v = judge_field(field, code, year, value, provenance=prov, debug=True)
+        v = judge_field(field, code, year, value, provenance=prov, debug=True,
+                        unit_label=_field_unit_label(code, year, field))
     except Exception as e:
         return {"error": "LLM 裁判异常: " + str(e)[:120]}
     try:
@@ -366,11 +389,12 @@ def judge_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dic
     prov = out.get("溯源") or {}
     if isinstance(prov.get(field), dict):
         prov = prov[field]
-    messages, grounding = build_judge_messages(field, code, year, value, provenance=prov)
+    unit_label = _field_unit_label(code, year, field)
+    messages, grounding = build_judge_messages(field, code, year, value, provenance=prov, unit_label=unit_label)
     if messages is None:
         return {"error": "无源文(溯源+RAG都没有),无法对话", "grounding": grounding}
     return {"code": code, "year": year, "field": field, "grounding": grounding,
-            "messages": messages, "result": value}
+            "unit": unit_label, "messages": messages, "result": value}
 
 
 def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:

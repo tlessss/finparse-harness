@@ -102,17 +102,23 @@ def _ensure_prov(field, code, year, field_value, provenance, spec):
 
 
 def build_judge_messages(field: str, code: str, year: int, field_value,
-                         provenance: Dict = None, spec=None):
+                         provenance: Dict = None, spec=None, unit_label: str = None):
     """构造发给 LLM 的 messages(不调用 LLM)。返回 (messages|None, grounding)。
-    抽出来是为了：① judge_field 复用 ② 调试台先拿到可编辑的对话。"""
+    抽出来是为了：① judge_field 复用 ② 调试台先拿到可编辑的对话。
+    unit_label: 源文金额单位(如'千元')。给 LLM 说明"解析值已换算为元",避免它把单位差误判 unit_error。"""
     prov = _ensure_prov(field, code, year, field_value, provenance, spec)
     source, grounding = _source_from_provenance(code, year, prov), "溯源原表"
     if not source:
         source, grounding = retrieve_source(code, year, field), "RAG检索"
     if not source:
         return None, grounding
+    unit_note = ""
+    if unit_label:
+        unit_note = (f"\n【单位提示】源文金额单位为「{unit_label}」；下面解析结果已统一换算为「元」。"
+                     f"对照数值时请先按单位换算（{unit_label}→元），换算后一致即正确，"
+                     f"不要因单位不同而误判 unit_error。\n")
     prompt = (
-        f"年报源文（{grounding}，来自解析值的出处，权威）：\n{source}\n\n"
+        f"年报源文（{grounding}，来自解析值的出处，权威）：\n{source}\n{unit_note}\n"
         f"待核对的解析结果（字段 {field}）：\n"
         f"{json.dumps(field_value, ensure_ascii=False, indent=2)}\n\n"
         f"请对照源文判断解析结果是否正确。{_TAXONOMY}\n"
@@ -125,10 +131,10 @@ def build_judge_messages(field: str, code: str, year: int, field_value,
 
 
 def judge_field(field: str, code: str, year: int, field_value,
-                provenance: Dict = None, spec=None, debug: bool = False) -> Dict:
+                provenance: Dict = None, spec=None, debug: bool = False, unit_label: str = None) -> Dict:
     """对某字段做 LLM 语义裁判：按溯源抠原表区域(主) / RAG 检索(兜底) 取源文 + 对照。
     debug=True 时把发给 LLM 的 system/prompt 原文 + LLM 原始回复一起返回(给调试台看)。"""
-    messages, grounding = build_judge_messages(field, code, year, field_value, provenance, spec)
+    messages, grounding = build_judge_messages(field, code, year, field_value, provenance, spec, unit_label)
     if messages is None:
         return {"verdict": "unknown", "confidence": 0.0, "issues": [],
                 "summary": "溯源+RAG均无源文，无法语义核对", "field": field,
