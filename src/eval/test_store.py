@@ -22,6 +22,10 @@ def _conn():
         created_at TEXT, stage TEXT, stock_code TEXT, year INTEGER, field TEXT,
         status TEXT, confidence TEXT, verdict TEXT, summary TEXT, payload TEXT, note TEXT,
         UNIQUE(stage, stock_code, year, field))""")
+    # LLM 判定对话台:每次发送(可能被人编辑过的 messages)+ LLM 回复,全留痕
+    c.execute("""CREATE TABLE IF NOT EXISTS judge_chats(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT,
+        stock_code TEXT, year INTEGER, field TEXT, messages TEXT, reply TEXT)""")
     return c
 
 
@@ -100,3 +104,36 @@ def stats():
     total = c.execute("SELECT COUNT(*) n FROM test_runs").fetchone()["n"]
     c.close()
     return {"total": total, "by_stage_verdict": rows}
+
+
+def save_chat(code, year, field, messages, reply):
+    """记一条 LLM 判定对话(发送的 messages + 回复)。返回行 id。"""
+    c = _conn()
+    cur = c.execute(
+        "INSERT INTO judge_chats(created_at,stock_code,year,field,messages,reply) VALUES(?,?,?,?,?,?)",
+        (time.strftime("%Y-%m-%d %H:%M:%S"), code, int(year), field,
+         json.dumps(messages, ensure_ascii=False), reply))
+    c.commit()
+    rid = cur.lastrowid
+    c.close()
+    return rid
+
+
+def list_chats(code=None, field=None, limit=200):
+    c = _conn()
+    q = "SELECT id,created_at,stock_code,year,field,messages,reply FROM judge_chats WHERE 1=1"
+    args = []
+    for col, val in (("stock_code", code), ("field", field)):
+        if val:
+            q += f" AND {col}=?"
+            args.append(val)
+    q += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    rows = [dict(r) for r in c.execute(q, args).fetchall()]
+    c.close()
+    for r in rows:
+        try:
+            r["messages"] = json.loads(r["messages"]) if r.get("messages") else []
+        except Exception:
+            r["messages"] = []
+    return rows

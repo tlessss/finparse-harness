@@ -348,6 +348,46 @@ def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             "system": v.get("_system"), "prompt": v.get("_prompt"), "raw": v.get("_raw")}
 
 
+def judge_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """对话台：解析该字段 → 拼好发给 LLM 的 messages(system+user) 但**不发送**,返给前端编辑。"""
+    from src.engine_orchestrator import FinParseAI
+    from src.agents.llm_judge import build_judge_messages
+    pdf = _pdf_path(code, year)
+    if not pdf:
+        return {"error": "无 PDF"}
+    if get_tables(code, year) is None:
+        return {"error": "无缓存（先解析一次该报告）"}
+    parser = FinParseAI()._get_parser(field, pdf)
+    try:
+        out = parser.parse(pdf, pre_scan=get_tables(code, year))
+    except Exception as e:
+        return {"error": "解析异常: " + str(e)[:100]}
+    value = out.get(field)
+    prov = out.get("溯源") or {}
+    if isinstance(prov.get(field), dict):
+        prov = prov[field]
+    messages, grounding = build_judge_messages(field, code, year, value, provenance=prov)
+    if messages is None:
+        return {"error": "无源文(溯源+RAG都没有),无法对话", "grounding": grounding}
+    return {"code": code, "year": year, "field": field, "grounding": grounding,
+            "messages": messages, "result": value}
+
+
+def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:
+    """把(可能被人编辑过的) messages 发给 LLM,记录整段对话,返回回复。"""
+    from src.agents.llm_client import chat
+    try:
+        reply = chat(messages, role="judge", temperature=0.3)
+    except Exception as e:
+        return {"error": "LLM 调用异常: " + str(e)[:120]}
+    try:
+        from src.eval.test_store import save_chat
+        save_chat(code, year, field, messages, reply)
+    except Exception:
+        pass
+    return {"reply": reply}
+
+
 def render_page(code: str, year: int, page: int) -> Dict:
     """渲染某报告某页为 base64 PNG（选表调试台"看PDF原页"用）。页码越界返回 error。"""
     pdf = _pdf_path(code, year)

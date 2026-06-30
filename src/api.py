@@ -448,6 +448,34 @@ def debug_judge(stock_code: str, year: int = 2025, field: str = "revenue_breakdo
     return judge_debug(stock_code, year, field)
 
 
+@app.get("/debug/judge/prepare")
+def debug_judge_prepare(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """对话台：拼好发给LLM的messages但不发送,返给前端编辑。"""
+    from src.console_service import judge_prepare
+    return judge_prepare(stock_code, year, field)
+
+
+class JudgeChatRequest(BaseModel):
+    code: str
+    year: int = 2025
+    field: str = "revenue_breakdown"
+    messages: list
+
+
+@app.post("/debug/judge/chat")
+def debug_judge_chat(req: JudgeChatRequest):
+    """对话台：把(可编辑过的)messages发给LLM,记录,返回回复。"""
+    from src.console_service import judge_chat
+    return judge_chat(req.code, req.year, req.field, req.messages)
+
+
+@app.get("/debug/judge/chats")
+def debug_judge_chats(code: str = None, field: str = None, limit: int = 200):
+    """对话台：列出记录下来的历史对话。"""
+    from src.eval.test_store import list_chats
+    return {"chats": list_chats(code, field, limit)}
+
+
 # ── 测试阶段数据库(SQLite) ──
 
 @app.get("/test/list")
