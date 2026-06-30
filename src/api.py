@@ -448,6 +448,13 @@ def debug_judge(stock_code: str, year: int = 2025, field: str = "revenue_breakdo
     return judge_debug(stock_code, year, field)
 
 
+@app.get("/debug/heal")
+def debug_heal(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """自愈测试台(真失败筛子)：判这份要不要自愈 + 病历/修复方向。"""
+    from src.console_service import heal_debug
+    return heal_debug(stock_code, year, field)
+
+
 @app.get("/debug/columns")
 def debug_columns(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
     """认列测试台：选中表怎么判 名称/金额/占比列。"""

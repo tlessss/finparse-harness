@@ -371,6 +371,55 @@ def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             "system": v.get("_system"), "prompt": v.get("_prompt"), "raw": v.get("_raw")}
 
 
+def heal_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """自愈测试台(真失败筛子)：先判这份要不要自愈——锚/维度一致当裁判,别修没坏的。
+    需自愈才给病历+修复方向。无锚/锚过/口径差 一律不自动自愈。"""
+    from src.engine_orchestrator import FinParseAI
+    from src.eval.field_spec import get_spec
+    from src.eval.anchors import get_anchors
+    pdf = _pdf_path(code, year)
+    if not pdf:
+        return {"error": "无 PDF"}
+    if get_tables(code, year) is None:
+        return {"error": "无缓存（先解析一次该报告）"}
+    spec = get_spec(field)
+    parser = FinParseAI()._get_parser(field, pdf)
+    try:
+        out = parser.parse(pdf, pre_scan=get_tables(code, year))
+    except Exception as e:
+        return {"error": "解析异常: " + str(e)[:100]}
+    data = out.get(field)
+    anchor = (get_anchors(code, year) or {}).get(_DBG_ANCHOR.get(field))
+    amt = getattr(spec, "amount_key", "revenue_yuan")
+    dims = []
+    rows_of = (data.items() if isinstance(data, dict) else [("明细", data)] if isinstance(data, list) else [])
+    for k, rows in rows_of:
+        if isinstance(rows, list) and rows:
+            s = sum((r.get(amt) or 0) for r in rows if isinstance(r, dict))
+            dims.append({"dim": k, "n": len(rows), "sum": s,
+                         "match": bool(anchor and s and abs(s - anchor) <= 0.03 * anchor)})
+    dim_sums = [d["sum"] for d in dims if d["sum"]]
+    any_match = any(d["match"] for d in dims)
+    agree = (max(dim_sums) / min(dim_sums) <= 1.03) if len(dim_sums) >= 2 and min(dim_sums) > 0 else None
+    fix_hint = None
+    if anchor is None:
+        verdict, reason, need = "无锚不自动判", "该字段没有DB锚(如客户/供应商/员工),不在确定性自愈范围,走LLM/人审", False
+    elif not dims:
+        verdict, reason, need = "需自愈", "解析为空,没抽到分项 → 查选表/认列(表没选对或列没认对)", True
+        fix_hint = "上游问题：先看 选表测试 / 认列测试"
+    elif any_match:
+        verdict, reason, need = "无需自愈", "至少一个维度分项和≈营业收入,数据可信(锚通过)", False
+    elif agree is True:
+        verdict, reason, need = "疑似口径差(非bug)", "各维度互相一致、只与锚差几个百分点 → 多为'营业收入 vs 营业总收入'口径,交人/LLM判,不自动自愈", False
+    else:
+        verdict, reason, need = "需自愈", "维度互相矛盾(分项和差异大,疑似抓串/翻倍)", True
+        if len(dim_sums) >= 2 and min(dim_sums) > 0 and max(dim_sums) / min(dim_sums) >= 1.8:
+            fix_hint = "某维度≈另一维度的2倍 → 疑似切桶漏(dim_leak)，建议规则工具 add_section_marker 补标记"
+    return {"code": code, "year": year, "field": field, "anchor": anchor, "dims": dims,
+            "any_match": any_match, "dims_agree": agree,
+            "verdict": verdict, "reason": reason, "need_heal": need, "fix_hint": fix_hint}
+
+
 def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     """认列测试台：选中表 → 解析器怎么判 名称列/金额列/占比列(内容法 + 表头法 + 最终)。"""
     from src.engine_orchestrator import FinParseAI
