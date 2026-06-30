@@ -398,18 +398,25 @@ def judge_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dic
 
 
 def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:
-    """把(可能被人编辑过的) messages 发给 LLM,记录整段对话,返回回复。"""
+    """把(可能被人编辑过的) messages 发给 LLM,记录整段对话,返回回复 + 解析出的判定。"""
     from src.agents.llm_client import chat
+    from src.agents.llm_judge import _extract_json
     try:
         reply = chat(messages, role="judge", temperature=0.3)
     except Exception as e:
         return {"error": "LLM 调用异常: " + str(e)[:120]}
+    # 解析回复 → 判"是否完全正确"：verdict=ok 且无任何 issue
+    v = _extract_json(reply) or {}
+    verdict, conf = v.get("verdict"), v.get("confidence")
+    issues = v.get("issues") or []
+    all_ok = (verdict == "ok" and len(issues) == 0) if verdict in ("ok", "suspicious") else None
     try:
         from src.eval.test_store import save_chat
         save_chat(code, year, field, messages, reply)
     except Exception:
         pass
-    return {"reply": reply}
+    return {"reply": reply, "verdict": verdict, "confidence": conf,
+            "issues": issues, "all_ok": all_ok}
 
 
 def render_page(code: str, year: int, page: int) -> Dict:
