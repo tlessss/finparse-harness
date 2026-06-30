@@ -29,8 +29,12 @@ def _from_db(code: str, year: int) -> Dict[str, float]:
         conn = get_conn()
         try:
             with conn.cursor() as cur:
+                # 同一(代码,年)可能有 年报+季报 多条;我们解析的是**年报** → 必须优先取 annual,
+                # 否则会拿到 q3 累计数当锚(如 601127 赛力斯:q3=1105亿 vs 年报=1650亿)。
                 cur.execute("SELECT income_statement FROM financial_reports "
-                            "WHERE stock_code=%s AND report_year=%s LIMIT 1", (code, year))
+                            "WHERE stock_code=%s AND report_year=%s "
+                            "ORDER BY (report_quarter='annual') DESC, report_date DESC LIMIT 1",
+                            (code, year))
                 row = cur.fetchone()
         finally:
             conn.close()
