@@ -311,8 +311,16 @@ class RevenueParser(BaseParser):
         return name_col, amount_col, ratio_col
 
     def _classify(self, table: list, unit_ratio: int = 1) -> Dict:
-        section_labels = {"分行业": "industries", "分产品": "segments", "分地区": "regions",
-                          "分销售模式": "by_channel", "分销售渠道": "by_channel"}
+        # 切桶标记：含常见变体。坑——有的报告写"销售模式"(无"分"),不补上则 直销/经销
+        # 漏进上一桶(regions),导致 regions 翻倍(赛力斯601127踩过)。
+        section_labels = {
+            "分行业": "industries", "按行业": "industries",
+            "分产品": "segments", "按产品": "segments",
+            "分地区": "regions", "按地区": "regions",
+            "分销售模式": "by_channel", "分销售渠道": "by_channel",
+            "销售模式": "by_channel", "按销售模式": "by_channel",
+            "销售渠道": "by_channel", "按销售渠道": "by_channel",
+        }
         sections = []
         for row in table:
             found = None
