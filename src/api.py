@@ -476,6 +476,19 @@ def debug_heal_chat(req: JudgeChatRequest):
     return heal_chat(req.code, req.year, req.field, req.messages)
 
 
+class AddMarkerRequest(BaseModel):
+    text: str
+    dim: str
+    field: str = "revenue"
+
+
+@app.post("/tool/add_section_marker")
+def tool_add_section_marker(req: AddMarkerRequest):
+    """规则工具：往 revenue.yaml dimensions 加切桶标记 text→dim（校验/幂等/冲突安全）。"""
+    from src.agents.rule_tools import add_section_marker
+    return add_section_marker(req.text, req.dim, req.field)
+
+
 @app.get("/debug/columns")
 def debug_columns(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
     """认列测试台：选中表怎么判 名称/金额/占比列。"""
