@@ -26,6 +26,11 @@ def _conn():
     c.execute("""CREATE TABLE IF NOT EXISTS judge_chats(
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT,
         stock_code TEXT, year INTEGER, field TEXT, messages TEXT, reply TEXT)""")
+    # 入库审核队列:LLM判ok→进这里(pending,浅绿)→人通过(approved,入库)/驳回(rejected)
+    c.execute("""CREATE TABLE IF NOT EXISTS review_commits(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, reviewed_at TEXT,
+        stock_code TEXT, year INTEGER, field TEXT, result TEXT, confidence TEXT,
+        source TEXT, status TEXT, note TEXT)""")
     return c
 
 
@@ -117,6 +122,66 @@ def save_chat(code, year, field, messages, reply):
     rid = cur.lastrowid
     c.close()
     return rid
+
+
+def enqueue_commit(code, year, field, result, confidence=None, source="llm_ok"):
+    """LLM判ok → 进入库审核队列(pending)。同(code,年,字段)只留一条待审,旧的覆盖。返回 id。"""
+    c = _conn()
+    c.execute("DELETE FROM review_commits WHERE stock_code=? AND year=? AND field=? AND status='pending'",
+              (code, int(year), field))
+    cur = c.execute(
+        "INSERT INTO review_commits(created_at,stock_code,year,field,result,confidence,source,status) "
+        "VALUES(?,?,?,?,?,?,?,'pending')",
+        (time.strftime("%Y-%m-%d %H:%M:%S"), code, int(year), field,
+         json.dumps(result, ensure_ascii=False), str(confidence), source))
+    c.commit()
+    rid = cur.lastrowid
+    c.close()
+    return rid
+
+
+def list_commits(status="pending", limit=300):
+    c = _conn()
+    q = "SELECT id,created_at,reviewed_at,stock_code,year,field,result,confidence,source,status,note FROM review_commits"
+    args = []
+    if status:
+        q += " WHERE status=?"
+        args.append(status)
+    q += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    rows = [dict(r) for r in c.execute(q, args).fetchall()]
+    c.close()
+    for r in rows:
+        try:
+            r["result"] = json.loads(r["result"]) if r.get("result") else None
+        except Exception:
+            pass
+    return rows
+
+
+def get_commit(rid):
+    """返回记录;result_json 保留原始字符串(给入库写库用),result 为解析后(给展示用)。"""
+    c = _conn()
+    r = c.execute("SELECT * FROM review_commits WHERE id=?", (rid,)).fetchone()
+    c.close()
+    if not r:
+        return None
+    d = dict(r)
+    d["result_json"] = d.get("result")
+    try:
+        d["result"] = json.loads(d["result"]) if d.get("result") else None
+    except Exception:
+        pass
+    return d
+
+
+def set_commit_status(rid, status, note=""):
+    c = _conn()
+    c.execute("UPDATE review_commits SET status=?, note=?, reviewed_at=? WHERE id=?",
+              (status, note, time.strftime("%Y-%m-%d %H:%M:%S"), rid))
+    c.commit()
+    c.close()
+    return True
 
 
 def list_chats(code=None, field=None, limit=200):

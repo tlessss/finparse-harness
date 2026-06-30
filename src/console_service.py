@@ -415,8 +415,64 @@ def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:
         save_chat(code, year, field, messages, reply)
     except Exception:
         pass
+    # LLM 判完全正确 → 重解析拿结果,送入库审核队列(pending,等人通过)
+    commit_id = None
+    if all_ok:
+        try:
+            from src.engine_orchestrator import FinParseAI
+            from src.eval.test_store import enqueue_commit
+            pdf = _pdf_path(code, year)
+            result = FinParseAI()._get_parser(field, pdf).parse(pdf, pre_scan=get_tables(code, year)).get(field)
+            commit_id = enqueue_commit(code, year, field, result, conf)
+        except Exception:
+            pass
     return {"reply": reply, "verdict": verdict, "confidence": conf,
-            "issues": issues, "all_ok": all_ok}
+            "issues": issues, "all_ok": all_ok, "commit_id": commit_id}
+
+
+_COMMIT_COLUMNS = {"revenue_breakdown", "cost_breakdown", "top_clients",
+                   "top_suppliers", "employees", "rnd_info"}   # financial_reports 里对应的列
+
+
+def commit_approve(rid: int, note: str = "") -> Dict:
+    """人审通过 → 把解析结果写进生产库 financial_reports.{field}(年报行)。"""
+    from src.eval.test_store import get_commit, set_commit_status
+    rec = get_commit(rid)
+    if not rec:
+        return {"error": "记录不存在"}
+    if rec.get("status") != "pending":
+        return {"error": "该记录已处理(" + str(rec.get("status")) + ")"}
+    field = rec["field"]
+    if field not in _COMMIT_COLUMNS:
+        return {"error": "字段 " + field + " 不支持入库"}
+    try:
+        from src.database import get_conn
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                # field 已过白名单,可安全拼列名
+                cur.execute(
+                    f"UPDATE financial_reports SET {field}=%s, pdf_parsed_at=NOW() "
+                    "WHERE stock_code=%s AND report_year=%s AND report_quarter='annual'",
+                    (rec["result_json"], rec["stock_code"], rec["year"]))
+                n = cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"error": "入库失败: " + str(e)[:140]}
+    set_commit_status(rid, "approved", note)
+    return {"ok": True, "rows_updated": n, "field": field, "code": rec["stock_code"]}
+
+
+def commit_reject(rid: int, note: str = "") -> Dict:
+    """人审驳回 → 不入库。"""
+    from src.eval.test_store import get_commit, set_commit_status
+    rec = get_commit(rid)
+    if not rec:
+        return {"error": "记录不存在"}
+    set_commit_status(rid, "rejected", note)
+    return {"ok": True}
 
 
 def render_page(code: str, year: int, page: int) -> Dict:

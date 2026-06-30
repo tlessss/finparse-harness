@@ -476,6 +476,34 @@ def debug_judge_chats(code: str = None, field: str = None, limit: int = 200):
     return {"chats": list_chats(code, field, limit)}
 
 
+# ── 入库审核队列(LLM判ok→人审→入库) ──
+
+@app.get("/commit/list")
+def commit_list(status: str = "pending", limit: int = 300):
+    """入库审核队列(默认 pending=待人审的浅绿项)。"""
+    from src.eval.test_store import list_commits
+    return {"commits": list_commits(status, limit)}
+
+
+class CommitActionRequest(BaseModel):
+    id: int
+    note: str = ""
+
+
+@app.post("/commit/approve")
+def commit_approve_api(req: CommitActionRequest):
+    """人审通过 → 写进生产库 financial_reports。"""
+    from src.console_service import commit_approve
+    return commit_approve(req.id, req.note)
+
+
+@app.post("/commit/reject")
+def commit_reject_api(req: CommitActionRequest):
+    """人审驳回 → 不入库。"""
+    from src.console_service import commit_reject
+    return commit_reject(req.id, req.note)
+
+
 # ── 测试阶段数据库(SQLite) ──
 
 @app.get("/test/list")
