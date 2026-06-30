@@ -332,7 +332,7 @@ def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     if isinstance(prov.get(field), dict):
         prov = prov[field]
     try:
-        v = judge_field(field, code, year, value, provenance=prov)
+        v = judge_field(field, code, year, value, provenance=prov, debug=True)
     except Exception as e:
         return {"error": "LLM 裁判异常: " + str(e)[:120]}
     try:
@@ -344,7 +344,8 @@ def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
         pass
     return {"code": code, "year": year, "field": field, "result": value,
             "verdict": v.get("verdict"), "confidence": v.get("confidence"),
-            "issues": v.get("issues") or [], "summary": v.get("summary"), "grounding": v.get("grounding")}
+            "issues": v.get("issues") or [], "summary": v.get("summary"), "grounding": v.get("grounding"),
+            "system": v.get("_system"), "prompt": v.get("_prompt"), "raw": v.get("_raw")}
 
 
 def render_page(code: str, year: int, page: int) -> Dict:
