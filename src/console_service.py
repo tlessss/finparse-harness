@@ -313,6 +313,40 @@ def parse_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             "dims": dims, "result": data, "amount_key": amt, "page": page, "provenance": prov}
 
 
+def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """LLM 判定测试台：解析出该字段 → LLM 对照溯源原表逐项判数据对不对(抓锚漏掉的逐行错)。"""
+    from src.engine_orchestrator import FinParseAI
+    from src.agents.llm_judge import judge_field
+    pdf = _pdf_path(code, year)
+    if not pdf:
+        return {"error": "无 PDF"}
+    if get_tables(code, year) is None:
+        return {"error": "无缓存（先解析一次该报告）"}
+    parser = FinParseAI()._get_parser(field, pdf)
+    try:
+        out = parser.parse(pdf, pre_scan=get_tables(code, year))
+    except Exception as e:
+        return {"error": "解析异常: " + str(e)[:100]}
+    value = out.get(field)
+    prov = out.get("溯源") or {}
+    if isinstance(prov.get(field), dict):
+        prov = prov[field]
+    try:
+        v = judge_field(field, code, year, value, provenance=prov)
+    except Exception as e:
+        return {"error": "LLM 裁判异常: " + str(e)[:120]}
+    try:
+        from src.eval.test_store import save_test
+        save_test("judge", code, year, field, status=v.get("verdict"), confidence=str(v.get("confidence")),
+                  summary={"verdict": v.get("verdict"), "issues": len(v.get("issues") or []), "grounding": v.get("grounding")},
+                  payload={"issues": v.get("issues")})
+    except Exception:
+        pass
+    return {"code": code, "year": year, "field": field, "result": value,
+            "verdict": v.get("verdict"), "confidence": v.get("confidence"),
+            "issues": v.get("issues") or [], "summary": v.get("summary"), "grounding": v.get("grounding")}
+
+
 def render_page(code: str, year: int, page: int) -> Dict:
     """渲染某报告某页为 base64 PNG（选表调试台"看PDF原页"用）。页码越界返回 error。"""
     pdf = _pdf_path(code, year)

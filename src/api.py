@@ -441,6 +441,13 @@ def debug_parse(stock_code: str, year: int = 2025, field: str = "revenue_breakdo
     return parse_debug(stock_code, year, field)
 
 
+@app.get("/debug/judge")
+def debug_judge(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """LLM判定测试台：解析→LLM对照溯源原表逐项判对错(慢,~10-20s)。"""
+    from src.console_service import judge_debug
+    return judge_debug(stock_code, year, field)
+
+
 # ── 测试阶段数据库(SQLite) ──
 
 @app.get("/test/list")
