@@ -384,10 +384,38 @@ def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dic
     table = sel[0].get("table") or []
     pdf = _pdf_path(code, year)
     p = FinParseAI()._get_parser(field, pdf)
+    n_cols = max((len(r) for r in table), default=0)
     out = {"code": code, "year": year, "field": field,
            "page": sel[0].get("page"),
            "table": [[(c or "") for c in row] for row in table[:30]],
-           "n_cols": max((len(r) for r in table), default=0)}
+           "n_cols": n_cols}
+    # 逐列数格子(认列的原始依据)：每列有几个 文字/数字/百分比 单元格
+    try:
+        stats = []
+        for ci in range(n_cols):
+            t = num = r = 0
+            for row in table:
+                if ci < len(row) and row[ci]:
+                    cv = row[ci].replace("\n", " ").strip()
+                    if not cv:
+                        continue
+                    if "%" in cv:
+                        r += 1
+                    elif p._looks_like_money(cv):
+                        num += 1
+                    elif p._is_text(cv):
+                        t += 1
+            stats.append({"col": ci, "text": t, "number": num, "ratio": r})
+        out["col_stats"] = stats
+    except Exception:
+        pass
+    out["steps"] = [
+        "第1步 逐列数格子：每列数清有几个 文字 / 像钱的数字 / 百分比 单元格（见下表）",
+        "第2步 找占比列：哪列有 ≥3 个 0~100% 的百分比 → 占比列（表头没命中占比别名时才认）",
+        "第3步 找金额列：哪列有 ≥3 个 像钱的数 → 金额列；若和占比列撞了，另选一个",
+        "第4步 找名称列：排除金额/占比列后，第一个有 ≥3 个文字的列 → 名称列",
+        "第5步 表头法覆盖：若 revenue.yaml 有表头别名，按表头精确认列，覆盖上面的统计结果",
+    ]
     try:
         if hasattr(p, "_detect_columns"):
             cn, ca, cr = p._detect_columns(table)
