@@ -294,6 +294,12 @@ def parse_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             s = sum((r.get(amt) or 0) for r in rows if isinstance(r, dict))
             dims.append({"dim": k, "n": len(rows), "sum": s,
                          "match": bool(anchor and s and abs(s - anchor) <= 0.03 * anchor)})
+    # 溯源(原PDF位置)：解析器直出的 {path:{page,bbox}}；兼容 {field:{path:...}} 嵌套
+    prov = out.get("溯源") or {}
+    if isinstance(prov.get(field), dict):
+        prov = prov[field]
+    pages = Counter(v["page"] for v in prov.values() if isinstance(v, dict) and v.get("page"))
+    page = pages.most_common(1)[0][0] if pages else None
     try:
         from src.eval.test_store import save_test
         save_test("parse", code, year, field, status=out.get("status"), confidence=sig.get("confidence"),
@@ -304,7 +310,7 @@ def parse_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     return {"code": code, "year": year, "field": field, "parser": type(parser).__name__,
             "status": out.get("status"), "anchor": anchor,
             "confidence": sig.get("confidence"), "anchored": sig.get("anchored"),
-            "dims": dims, "result": data}
+            "dims": dims, "result": data, "amount_key": amt, "page": page, "provenance": prov}
 
 
 def render_page(code: str, year: int, page: int) -> Dict:
