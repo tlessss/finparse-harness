@@ -431,6 +431,46 @@ def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dic
             out["final"] = {"name": fn, "amount": fa, "ratio": fr}
     except Exception as e:
         out["warn"] = "认列异常: " + str(e)[:100]
+    # 这份财报的**具体**认列过程(带真实列号/候选/原因),不是通用步骤
+    try:
+        stats = {s["col"]: s for s in out.get("col_stats", [])}
+        pct_cand, money_cand = [], []
+        for ci in range(n_cols):
+            valid = 0
+            for row in table:
+                if ci < len(row) and row[ci] and "%" in row[ci]:
+                    try:
+                        x = float(row[ci].replace("%", "").replace(",", "").strip())
+                        if 0 <= x <= 100:
+                            valid += 1
+                    except ValueError:
+                        pass
+            if valid >= 3:
+                pct_cand.append(ci)
+            if stats.get(ci, {}).get("number", 0) >= 3:
+                money_cand.append(ci)
+        cm = out.get("content_method", {})
+        cn, ca, cr = cm.get("name"), cm.get("amount"), cm.get("ratio")
+        fin = out.get("final", {})
+        hm = out.get("header_method")
+        trace = [f"① 数格子：这张表共 {n_cols} 列、{len(table)} 行（逐列统计见下表）"]
+        trace.append(
+            f"② 找占比列：列 {pct_cand} 各有 ≥3 个 0~100% 的百分比 → 取第一个 = 列{cr}" if pct_cand
+            else "② 找占比列：没有任何列有 ≥3 个带 % 的 0~100 数 → 占比列空（多半是占比没带 % 号，如写成 28.21）")
+        trace.append(
+            f"③ 找金额列：列 {money_cand} 各有 ≥3 个像钱的数 → 取第一个 = 列{ca}" if money_cand
+            else "③ 找金额列：没有列满足像钱的数 ≥3 → 金额列空")
+        trace.append(
+            f"④ 找名称列：排除金额列{ca}、占比列{cr} 后，列{cn} 有 {stats.get(cn, {}).get('text', 0)} 个文字 → 名称列 = 列{cn}"
+            if cn is not None else "④ 找名称列：没找到文字列")
+        if out.get("has_yaml_rule") and hm:
+            trace.append(f"⑤ 表头法(读 revenue.yaml 别名)：按表头认出 名称={hm.get('name')} 金额={hm.get('amount')} 占比={hm.get('ratio')} → 覆盖统计法")
+        else:
+            trace.append("⑤ 表头法：没有 YAML 别名 → 直接用统计法结果")
+        trace.append(f"✅ 最终：名称=列{fin.get('name')}、金额=列{fin.get('amount')}、占比=列{fin.get('ratio')}")
+        out["trace"] = trace
+    except Exception:
+        pass
     return out
 
 
