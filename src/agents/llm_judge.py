@@ -30,6 +30,10 @@ _QUERIES = {
     "top_suppliers": "前五名供应商 采购额 占年度采购总额比例",
 }
 
+# 字段名 → select_table 的信号名（拿"该字段选中表"的网格用）
+_FIELD_SIG = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd",
+              "employees": "employee", "top_clients": "client", "top_suppliers": "supplier"}
+
 _SYS = "你是严谨的 A 股年报数据审核员。对照年报源文判断解析结果是否正确。只输出 JSON，不要解释。"
 
 _TAXONOMY = ("常见错误类型：unit_error(单位错位:万元/元/亿元)、pnl_misid(把毛利率当占比/选错表)、"
@@ -97,6 +101,37 @@ def _source_from_provenance(code: str, year: int, prov: Dict) -> str:
     return "\n".join(p for p in parts if p.strip())
 
 
+def _grid_to_text(table: list, max_rows: int = 45) -> str:
+    """把二维表格网格渲染成**行列清晰**的表格文本(去全空列/空行)——优于抠图的碎文本，
+    LLM 能直接看清每个数字在哪一列/哪一期，不必靠出现顺序去脑补对齐。"""
+    rows = [[(c or "").replace("\n", "").strip() for c in row] for row in (table or [])[:max_rows]]
+    nc = max((len(r) for r in rows), default=0)
+    if not nc:
+        return ""
+    rows = [r + [""] * (nc - len(r)) for r in rows]
+    keep = [ci for ci in range(nc) if any(rows[ri][ci] for ri in range(len(rows)))]   # 去全空列
+    lines = []
+    for r in rows:
+        cells = [r[ci] for ci in keep]
+        if any(cells):                                                                # 去全空行
+            lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _source_grid(code: str, year: int, field: str) -> str:
+    """该字段选中表的二维网格 → 结构化表格文本。走 select_table(和解析同源的那张表)。"""
+    try:
+        from src.eval.table_cache import get_tables
+        from src.parsers.infra.table_recall import select_table
+        tables = get_tables(code, year)
+        if not tables:
+            return ""
+        sel = select_table(tables, code, year, _FIELD_SIG.get(field, "revenue"))
+        return _grid_to_text(sel.get("table")) if sel else ""
+    except Exception:
+        return ""
+
+
 def _ensure_prov(field, code, year, field_value, provenance, spec):
     if provenance is not None:
         return provenance
@@ -112,7 +147,9 @@ def build_judge_messages(field: str, code: str, year: int, field_value,
     抽出来是为了：① judge_field 复用 ② 调试台先拿到可编辑的对话。
     unit_label: 源文金额单位(如'千元')。给 LLM 说明"解析值已换算为元",避免它把单位差误判 unit_error。"""
     prov = _ensure_prov(field, code, year, field_value, provenance, spec)
-    source, grounding = _source_from_provenance(code, year, prov), "溯源原表"
+    source, grounding = _source_grid(code, year, field), "选中表网格"           # 主:结构化表格,行列清晰
+    if not source:
+        source, grounding = _source_from_provenance(code, year, prov), "溯源原表"   # 退:抠图碎文本
     if not source:
         source, grounding = retrieve_source(code, year, field), "RAG检索"
     if not source:
@@ -172,7 +209,9 @@ def build_verify_messages(field: str, code: str, year: int, field_value, sig: Di
     """构造发给复核 agent 的 messages。返回 (messages|None, grounding)。
     sig: 该字段的 field_plausibility 信号（带 anchor / parsed_total，用来告诉 agent 锚证明了什么）。"""
     prov = _ensure_prov(field, code, year, field_value, provenance, spec)
-    source, grounding = _source_from_provenance(code, year, prov), "溯源原表"
+    source, grounding = _source_grid(code, year, field), "选中表网格"           # 主:结构化表格,行列清晰
+    if not source:
+        source, grounding = _source_from_provenance(code, year, prov), "溯源原表"   # 退:抠图碎文本
     if not source:
         source, grounding = retrieve_source(code, year, field), "RAG检索"
     if not source:
@@ -191,15 +230,17 @@ def build_verify_messages(field: str, code: str, year: int, field_value, sig: Di
         f"年报源文（{grounding}，权威）：\n{source}\n{anchor_note}{unit_note}\n"
         f"待复核的解析结果（字段 {field}）：\n"
         f"{json.dumps(field_value, ensure_ascii=False, indent=2)}\n\n"
-        f"请把**解析结果的每一项(名称/金额/占比)逐一拿到上面源文表格里对照**，看数据和表格对不对得上：\n"
-        f"名称有没有抠错/串到别行、金额有没有取错格(取到隔壁列或上期那一列)、占比对不对、"
+        f"请把**解析结果里每一项逐一拿到上面源文表格里对照**，核对解析结果**实际含有的字段**（名称、金额）：\n"
+        f"名称有没有抠错/串到别行、金额有没有取错格(取到隔壁列或上期那一列)、"
         f"有没有把'其中：X'这类子项当成顶层项、把合计行当明细行混进来。\n"
+        f"⚠ **占比不用核**：营收解析结果不含占比(ratio_pct)是有意为之（占比由 金额/营收 另算，不解析）——"
+        f"**别因源文表格里有占比列、而解析结果没有占比，就判 hold**。\n"
         f"（总额和各维度切分是否完整——跨表锚已保证，这些不用你再核；你只管**逐项比对数据与源文表格是否一致**。）\n"
         f"⚠ 只依据源文里**真实出现**的文字判断；源文没写的信息（尤其**年份/期间**）**绝不臆测**——"
         f"表里若是两组数据并排、又没标年份，就用'第一组/第二组（左/右）'或'本期/上期'描述，**不要编造'20XX年'**。\n"
         f"每一项都能在表格里对上就判 pass；发现对不上的才 hold，别为改而改。\n"
         '只输出 JSON：{"verdict":"pass|hold","suspects":[{"field":"如segments[2].revenue_yuan",'
-        '"issue":"name_error|amount_error|ratio_bad|dup_count|extra_row|other",'
+        '"issue":"name_error|amount_error|dup_count|extra_row|other",'
         '"reason":"源文表格里的正确值/依据"}],"summary":"一句话结论"}'
     )
     return [{"role": "system", "content": _SYS_VERIFY}, {"role": "user", "content": prompt}], grounding

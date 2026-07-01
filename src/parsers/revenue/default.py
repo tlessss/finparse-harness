@@ -200,7 +200,7 @@ class RevenueParser(BaseParser):
                     break
             sections.append(found)
 
-        name_col, amount_col, ratio_col = self._resolve_columns(table, amount_hint=amount_hint)
+        name_col, amount_col, _ = self._resolve_columns(table, amount_hint=amount_hint)  # 占比列不再取(占比不解析)
 
         # 溯源：取该表的 (页码, 坐标网格)（_extract_tables 旁挂）
         page, cell_bbox = getattr(self, "_bbox_map", {}).get(id(table), (None, None))
@@ -225,30 +225,19 @@ class RevenueParser(BaseParser):
             if current not in seen:
                 seen[current] = set()
 
-            cells = [c.strip() if c else "" for c in row]
+            cells = [(c or "").replace("\n", "").strip() for c in row]
 
             non_empty = [c for c in cells if c]
             if len(non_empty) <= 2 and non_empty:
                 merged = non_empty[0]
                 parts = [p.strip() for p in merged.split(" ") if p.strip()]
                 name = parts[0] if parts else ""
-                amount_raw = ""
-                ratio_raw = ""
-                for p in parts[1:]:
-                    if "%" in p:
-                        if not ratio_raw:
-                            ratio_raw = p
-                    elif self._looks_like_money(p):
-                        if not amount_raw:
-                            amount_raw = p
+                amount_raw = next((p for p in parts[1:] if self._looks_like_money(p)), "")
             else:
                 name = cells[name_col] if name_col is not None and name_col < len(cells) else ""
                 amount_raw = cells[amount_col] if amount_col is not None and amount_col < len(cells) else ""
-                if "%" in amount_raw:
-                    ratio_raw = amount_raw
+                if "%" in amount_raw:            # 金额列命中%值=取错到占比列 → 清空(占比不解析,由 金额/锚 算)
                     amount_raw = ""
-                else:
-                    ratio_raw = cells[ratio_col] if ratio_col is not None and ratio_col < len(cells) else ""
 
             if not name or name in ("项 目", "项目", "") or is_total_row(name):
                 continue
@@ -259,18 +248,12 @@ class RevenueParser(BaseParser):
                 continue
 
             amount = self._parse_number(amount_raw) if amount_raw else None
-            ratio = self._parse_ratio(ratio_raw) if ratio_raw else None
-
-            if ratio is not None and (ratio < 0 or ratio > 100):
-                ratio = None
-
-            if ratio is None and amount is None:
+            if amount is None:                   # 只收有金额的项(占比不再解析,下游用 金额/锚 算)
                 continue
 
             item = {
                 "name": name.split("  ")[0].strip()[:30],
-                "revenue_yuan": convert_to_yuan(amount, unit_ratio) if amount else None,
-                "ratio_pct": ratio,
+                "revenue_yuan": convert_to_yuan(amount, unit_ratio),
             }
             if name not in seen.get(current, set()):
                 idx = len(result[current])
@@ -286,10 +269,6 @@ class RevenueParser(BaseParser):
                         ab = _bbox_at(row_idx, amount_col)
                         if ab:
                             provenance[f"{base}.revenue_yuan"] = {"page": page, "bbox": ab}
-                    if ratio is not None:
-                        rb = _bbox_at(row_idx, ratio_col)
-                        if rb:
-                            provenance[f"{base}.ratio_pct"] = {"page": page, "bbox": rb}
 
         return result, provenance
 
