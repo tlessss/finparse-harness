@@ -70,3 +70,105 @@ def vector_recall(tables: List[Dict], field: str = "revenue",
         key=lambda x: -x["recall_score"])
     keep = [t for t in ranked if t["recall_score"] >= threshold]
     return (keep or ranked)[:top_k]
+
+
+# ── 选表解耦第二段：锚精判 ──
+
+_ANCHOR_KEY = {"revenue": "revenue", "cost": "cost", "rnd": "rnd_expense"}
+_UNIT_MULTS = (1, 1000, 10000, 100000000)   # 元/千元/万元/亿元 —— 锚本身能反推是哪种
+
+
+def _col_values(table: List[list], ci: int) -> list:
+    from src.parsers.infra.table_scanner import parse_money
+    out = []
+    for row in table:
+        if ci < len(row) and row[ci]:
+            m = parse_money(row[ci])
+            if m is not None:
+                out.append(m)
+    return out
+
+
+def _best_col_vs_anchor(table: List[list], anchor: float):
+    """这张表里"最能解释 anchor"的数字列 + 相对误差(0最好)。
+    检查每列(试单位倍数): 含≈anchor的值(合计行/单维大值) 或 列和≈k*anchor(k=1..6,多维堆叠)。"""
+    ncols = max((len(r) for r in table), default=0)
+    best_col, best_rel = None, 1e18
+    for ci in range(ncols):
+        vals = _col_values(table, ci)
+        if not vals:
+            continue
+        for mult in _UNIT_MULTS:
+            scaled = [v * mult for v in vals]
+            for v in scaled:                                   # 合计行/单维大值 ≈ 锚
+                rel = abs(v - anchor) / anchor
+                if rel < best_rel:
+                    best_rel, best_col = rel, ci
+            s = sum(scaled)                                    # 多维堆叠:列和 ≈ k*锚
+            for k in range(1, 7):
+                rel = abs(s - k * anchor) / anchor
+                if rel < best_rel:
+                    best_rel, best_col = rel, ci
+    return best_col, best_rel
+
+
+def anchor_select(tables: List[Dict], code: str, year: int,
+                  field: str = "revenue", tol: float = 0.03) -> List[Dict]:
+    """锚精判:召回候选里,哪张表的哪列数字能解释锚(营业收入/成本) → 定表+定金额列。
+    返回按"对锚误差"升序的候选 [{**表项, amount_col, anchor_rel, matched}];无锚返回 None(交回退)。"""
+    from src.eval.anchors import get_anchors
+    key = _ANCHOR_KEY.get(field)
+    anchor = (get_anchors(code, year) or {}).get(key) if key else None
+    if not anchor:
+        return None
+    scored = []
+    for t in tables:
+        grid = t.get("table")
+        if not grid:
+            continue
+        col, rel = _best_col_vs_anchor(grid, anchor)
+        scored.append({**t, "amount_col": col, "anchor_rel": round(rel, 4), "matched": rel <= tol})
+    scored.sort(key=lambda x: x["anchor_rel"])
+    return scored
+
+
+def _dimension_map() -> dict:
+    from src.parsers.infra.rule_loader import load_rule
+    dims = ((load_rule("revenue") or {}).get("revenue_breakdown", {}) or {}).get("dimensions") or {}
+    return dims or {"分行业": "industries", "分产品": "segments", "分地区": "regions", "分销售模式": "by_channel"}
+
+
+def _dimension_count(table: List[list]) -> int:
+    """表覆盖了几个不同维度(industries/segments/regions/by_channel)。
+    标准营收构成表覆盖多个(2~4);附注里的单一分类收入表只覆盖1个 → 用来区分,选覆盖最多的。"""
+    dmap = _dimension_map()
+    found = set()
+    for row in (table or []):
+        for c in row:
+            if not c:
+                continue
+            for marker, dim in dmap.items():
+                if marker in c:
+                    found.add(dim)
+    return len(found)
+
+
+def select_table(tables: List[Dict], code: str, year: int,
+                 field: str = "revenue", tol: float = 0.03):
+    """选表解耦全流程:① 向量召回候选 → ② 锚精判定表定列（营收/成本再按"覆盖维度数"闸,区分构成表 vs 附注单一分类表）。
+    返回 {table_item, amount_col, anchor_rel, matched, dim_count, via} 或 None(召回空)。"""
+    recalled = vector_recall(tables, field, top_k=8, threshold=0.0)
+    if not recalled:
+        return None
+    judged = anchor_select(recalled, code, year, field, tol)
+    if judged is None:                       # 无锚 → 退回召回第一名(纯语义)
+        top = recalled[0]
+        return {**top, "amount_col": None, "anchor_rel": None, "matched": None, "via": "recall_only"}
+    if field in ("revenue", "cost"):
+        for c in judged:
+            c["dim_count"] = _dimension_count(c.get("table"))
+        # 候选池:对锚够近(放宽到5%容口径差) → 里面选"覆盖维度最多"的,平票取对锚最近
+        pool = [c for c in judged if c["anchor_rel"] <= 0.05 and c["dim_count"] >= 1] or judged
+        pool.sort(key=lambda c: (-c["dim_count"], c["anchor_rel"]))
+        return {**pool[0], "via": "recall+anchor+dims"}
+    return {**judged[0], "via": "recall+anchor"}

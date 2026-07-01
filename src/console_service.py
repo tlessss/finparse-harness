@@ -209,17 +209,30 @@ def _field_unit_label(code: str, year: int, field: str):
 
 
 def recall_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
-    """向量召回测试台：语义相似度把哪些表排前面(去数字只留文字→BGE→比意图参照)。"""
-    from src.parsers.infra.table_recall import vector_recall, _table_textdoc, _FIELD_QUERY
+    """选表解耦测试台：① 向量召回 → ② 锚精判 → ③ 维度数闸 → 最终选中。逐候选给三路信号。"""
+    from src.parsers.infra.table_recall import (
+        vector_recall, anchor_select, _dimension_count, select_table, _table_textdoc, _FIELD_QUERY)
     tables = get_tables(code, year)
     if not tables:
         return {"error": "无缓存（先解析一次该报告）"}
     sig = _DBG_SIG.get(field, "revenue")
-    ranked = vector_recall(tables, sig, top_k=10, threshold=0.0)
-    cands = [{"page": t.get("page"), "score": t.get("recall_score"),
-              "doc": _table_textdoc(t.get("table"))[:90]} for t in ranked]
+    recalled = vector_recall(tables, sig, top_k=8, threshold=0.0)
+    judged = anchor_select(recalled, code, year, sig)          # 可能 None(无锚)
+    by_page = {id(c.get("table")): c for c in (judged or [])}
+    cands = []
+    for t in recalled:
+        j = by_page.get(id(t.get("table")), {})
+        cands.append({"page": t.get("page"), "recall_score": t.get("recall_score"),
+                      "anchor_rel": j.get("anchor_rel"), "amount_col": j.get("amount_col"),
+                      "dim_count": _dimension_count(t.get("table")) if sig in ("revenue", "cost") else None,
+                      "doc": _table_textdoc(t.get("table"))[:90]})
+    pick = select_table(tables, code, year, sig)
     return {"code": code, "year": year, "field": field, "sig": sig,
-            "query": _FIELD_QUERY.get(sig), "total_tables": len(tables), "candidates": cands}
+            "query": _FIELD_QUERY.get(sig), "total_tables": len(tables), "has_anchor": judged is not None,
+            "candidates": cands,
+            "selected": {"page": pick.get("page"), "amount_col": pick.get("amount_col"),
+                         "anchor_rel": pick.get("anchor_rel"), "dim_count": pick.get("dim_count"),
+                         "via": pick.get("via")} if pick else None}
 
 
 def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
