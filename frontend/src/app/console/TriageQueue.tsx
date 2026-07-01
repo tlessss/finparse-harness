@@ -69,7 +69,7 @@ export default function TriageQueue() {
     <div className="space-y-4">
       {/* 安全感大数字（后端 /triage/summary）*/}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Card title="🟢 已核验（可信）" value={srv?.verified ?? 0} sub={`${srv?.verified_pct ?? 0}% · 锚验证过，可放心`} accent="text-green-600" />
+        <Card title="🟢 已核验（可信）" value={srv?.verified ?? 0} sub={`${srv?.verified_pct ?? 0}% · 锚过+复核 agent 通过`} accent="text-green-600" />
         <Card title="📊 解析出数据" value={srv?.parsed ?? 0} sub={`${srv?.parsed_pct ?? 0}% · 含待核验(黄)`} accent="text-blue-600" />
         <Card title="🔴 待办" value={srv?.open ?? 0} sub={`累计字段 ${srv?.total ?? 0}`} accent="text-red-600" />
         <Card title="净通过率" value={`${srv?.verified_pct ?? 0}%`} sub="已核验 / 总字段" accent="text-green-700" />
@@ -122,7 +122,7 @@ export default function TriageQueue() {
         </select>
         <div className="ml-auto flex items-center gap-2">
           <button onClick={scan} className="px-2.5 py-1 rounded text-xs bg-gray-100 text-gray-600 hover:bg-gray-200">↻ 手动扫描</button>
-          <button onClick={reviewLow} className="px-2.5 py-1 rounded text-xs bg-orange-100 text-orange-700 hover:bg-orange-200">批量复核 low</button>
+          <button onClick={reviewLow} className="px-2.5 py-1 rounded text-xs bg-orange-100 text-orange-700 hover:bg-orange-200">批量诊断 low</button>
           <span className="text-xs text-gray-400">{filtered.length} 条</span>
         </div>
       </div>
@@ -160,7 +160,7 @@ export default function TriageQueue() {
                 <td className="px-4 py-2 space-x-2 whitespace-nowrap">
                   <button onClick={() => goReview(r.code, r.year, r.field)} className="text-blue-600 hover:underline text-xs">审核</button>
                   {r.status === "open" && <button onClick={() => claim(r)} className="text-gray-500 hover:underline text-xs">认领</button>}
-                  {r.reason === "low_confidence" && <button onClick={() => recheck(r)} className="text-orange-600 hover:underline text-xs">复核</button>}
+                  {r.reason === "low_confidence" && <button onClick={() => recheck(r)} className="text-orange-600 hover:underline text-xs">诊断</button>}
                 </td>
               </tr>
             ))}

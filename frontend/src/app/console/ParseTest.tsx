@@ -21,6 +21,7 @@ type Prov = { page: number; bbox: [number, number, number, number] };
 type Item = Record<string, unknown>;
 type Resp = {
   code?: string; field?: string; parser?: string; status?: string;
+  source?: string; routed?: boolean; parser_key?: string | null;
   anchor?: number | null; confidence?: string; anchored?: boolean | null; dims?: Dim[]; error?: string;
   result?: Record<string, Item[]> | Item[] | null; amount_key?: string;
   page?: number | null; provenance?: Record<string, Prov> | null;
@@ -70,13 +71,13 @@ export default function ParseTest({ initial, onNext }: {
   };
   useEffect(() => { loadStockNames().then(() => setTick((t) => t + 1)); if (initial?.code) run(); }, []);
 
-  const anchorMatched = resp?.dims?.some((d) => d.match);
+  const anchorMatched = resp?.anchored ?? resp?.dims?.every((d) => d.match);
 
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-lg shadow-sm border p-4">
-        <h2 className="font-semibold mb-1">冷启动解析测试台
-          <span className="text-xs font-normal text-gray-400 ml-2">— 路由未命中时,强制跑通用解析器,看各维度对不对锚</span>
+        <h2 className="font-semibold mb-1">解析测试（路由优先）
+          <span className="text-xs font-normal text-gray-400 ml-2">— 先②路由:命中认证解析器就用它(不冷启动);没命中才冷启动。看各维度对不对锚</span>
         </h2>
         <div className="flex items-center gap-2 flex-wrap text-sm mt-2">
           <div className="relative">
@@ -100,7 +101,7 @@ export default function ParseTest({ initial, onNext }: {
           </select>
           <button onClick={() => run()} disabled={loading || !code}
             className="px-4 py-1.5 rounded bg-blue-600 text-white disabled:opacity-40 hover:bg-blue-700">
-            {loading ? "解析中…" : "▶ 测试冷启动解析"}
+            {loading ? "解析中…" : "▶ 测试解析（路由优先）"}
           </button>
           {onNext && (
             <button onClick={() => onNext({ code, year, field })} disabled={!resp || !!resp.error}
@@ -121,9 +122,12 @@ export default function ParseTest({ initial, onNext }: {
           <div className="bg-white rounded-lg shadow-sm border p-4 space-y-2">
             <div className="flex items-center gap-3 flex-wrap text-sm">
               <span>{codeLabel(resp.code || code)} · {FIELD_LABEL[resp.field || field]}</span>
+              {resp.routed
+                ? <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700 font-medium">② 路由命中 → 用认证解析器「{resp.parser_key || resp.parser}」，不冷启动</span>
+                : <span className="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-700">② 未命中 → 冷启动通用解析器</span>}
               <span className="text-xs text-gray-400">解析器：{resp.parser}</span>
               <span className={`px-3 py-1 rounded text-sm font-medium ${anchorMatched ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-600"}`}>
-                {anchorMatched ? "✓ 过锚（至少一维≈营业收入）" : "✗ 没过锚（无维度对得上）"}
+                {anchorMatched ? "✓ 过锚（每个维度都≈营业收入）" : "✗ 没过锚（有维度对不上）"}
               </span>
               <span className="text-xs text-gray-500">锚={resp.anchor != null ? yi(resp.anchor) : "无"} · 置信={resp.confidence}</span>
             </div>

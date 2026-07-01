@@ -7,12 +7,23 @@ import { apiGet } from "./api";
 import TestHistory from "./TestHistory";
 
 const FIELDS = ["revenue_breakdown", "cost_breakdown", "rnd_info", "employees", "top_clients", "top_suppliers"];
+const DIM_CN: Record<string, string> = { industries: "分行业", segments: "分产品", regions: "分地区", by_channel: "分销售模式", 明细: "明细", rnd_detail: "研发明细" };
+const yi = (n: number) => (Math.abs(n) >= 1e8 ? (n / 1e8).toFixed(2) + "亿" : n.toLocaleString());
+type Item = Record<string, unknown>;
+const asDims = (result: Record<string, Item[]> | Item[] | null | undefined): [string, Item[]][] => {
+  if (Array.isArray(result)) return [["明细", result]];
+  if (result && typeof result === "object") return Object.entries(result).filter(([, v]) => Array.isArray(v)) as [string, Item[]][];
+  return [];
+};
+const numKeys = (it: Item) => Object.keys(it).filter((k) => k !== "name" && typeof it[k] === "number");
+const fmtCell = (v: unknown, k: string) => (typeof v !== "number" ? "" : k.includes("ratio") ? v + "%" : yi(v));
 type Resp = {
   code?: string; field?: string; fingerprint?: string; cache_hit?: boolean;
   status?: string; parser_key?: string | null;
   n_certified_field?: number; certified_keys?: string[]; fp_matched?: string[];
   tried?: [string, boolean][]; confidence?: string; anchored?: boolean | null; anchor?: number | null;
   result_summary?: Record<string, number>; error?: string;
+  result?: Record<string, Item[]> | Item[] | null; amount_key?: string; page?: number | null;
 };
 
 type RouteProps = {
@@ -31,7 +42,18 @@ export default function RouteTest({ initial, onNext }: RouteProps = {}) {
   const [open, setOpen] = useState(false);
   const [namesTick, setNamesTick] = useState(0);
   const [runCount, setRunCount] = useState(0);
+  const [pageImg, setPageImg] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(false);
   const pick = (c: string, y: number, f: string) => { setCode(c); setYear(y); setField(f); run(c, y, f); };
+
+  // 结果出来后 → 拉溯源页的 PDF 图
+  useEffect(() => {
+    setPageImg(null);
+    const pg = resp?.page;
+    if (!pg || resp?.error) return;
+    apiGet<{ page_image: string } | null>(`/debug/page?stock_code=${resp?.code || code}&year=${year}&page=${pg}`, null)
+      .then(({ data, live }) => { if (live && data?.page_image) setPageImg(data.page_image); });
+  }, [resp?.page, resp?.code]);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -135,7 +157,53 @@ export default function RouteTest({ initial, onNext }: RouteProps = {}) {
               <div className="mt-2 text-xs text-gray-400">该字段全部认证器：{resp.certified_keys.join(" / ")}</div>
             )}
           </div>
+
+          {/* 解析结果明细 */}
+          {asDims(resp.result).length > 0 && (
+            <div className="bg-white rounded-lg shadow-sm border p-4 space-y-3">
+              <h3 className="text-sm font-medium text-gray-600">解析结果（{routed ? `认证解析器「${resp.parser_key}」直出` : "冷启动"}）</h3>
+              {asDims(resp.result).map(([dim, rows]) => (
+                <div key={dim}>
+                  <div className="text-xs text-gray-500 mb-1">{DIM_CN[dim] || dim} · {rows.length} 项</div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {rows.map((it, i) => (
+                        <tr key={i} className="border-t">
+                          <td className="px-2 py-1 text-gray-700">{String(it.name ?? "")}</td>
+                          {numKeys(it).map((k) => (
+                            <td key={k} className="px-2 py-1 text-right text-gray-600 tabular-nums whitespace-nowrap">{fmtCell(it[k], k)}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 溯源 PDF 原页 */}
+          <div className="bg-white rounded-lg shadow-sm border p-3">
+            <div className="text-xs text-gray-400 mb-1">
+              溯源 · PDF 第 {resp.page ?? "?"} 页（该字段所在表出处，点图放大对照）
+              {routed && <span className="text-gray-300"> · 认证解析器不产单元格坐标，展示整页对照</span>}
+            </div>
+            {pageImg ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={pageImg} alt={`page${resp.page}`} onClick={() => setZoom(true)}
+                className="w-full max-w-2xl mx-auto border cursor-zoom-in" />
+            ) : (
+              <div className="text-xs text-gray-400 p-6 text-center">{resp.page ? "渲染中…（该报告需先解析过有页缓存）" : "无溯源页"}</div>
+            )}
+          </div>
         </>
+      )}
+
+      {zoom && pageImg && (
+        <div onClick={() => setZoom(false)} className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 cursor-zoom-out">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={pageImg} alt="zoom" className="max-h-full max-w-full object-contain" />
+        </div>
       )}
     </div>
   );

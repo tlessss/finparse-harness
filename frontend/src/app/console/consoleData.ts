@@ -30,18 +30,19 @@ export const FIELD_LABEL: Record<string, string> = {
 };
 
 // ── 分诊 reason ──
-// routed 是 status=ok 记录的 reason（绿，可信），不在待办里；其余是待办的分类。
-export type Reason = "routed" | "needs_write" | "low_confidence" | "unverified" | "suspicious" | "needs_human";
+// routed 是 status=ok 记录的 reason（绿，复核 agent 通过），不在待办里；其余是待办的分类。
+export type Reason = "routed" | "needs_write" | "low_confidence" | "unverified" | "suspicious" | "needs_human" | "review_hold";
 export const REASON_META: Record<Reason, { label: string; todo: string; cls: string }> = {
-  routed:         { label: "可信",       todo: "已认证路由 + 锚验证过",       cls: "bg-green-100 text-green-700" },
+  routed:         { label: "可信",       todo: "锚过 + 复核 agent 通过",      cls: "bg-green-100 text-green-700" },
   needs_write:    { label: "需写解析器", todo: "写新解析器(给 golden→自愈)", cls: "bg-red-100 text-red-700" },
-  low_confidence: { label: "低置信",     todo: "锚对不上，复核(LLM/人)",      cls: "bg-orange-100 text-orange-700" },
+  low_confidence: { label: "低置信",     todo: "锚对不上，诊断(LLM/人)",      cls: "bg-orange-100 text-orange-700" },
   unverified:     { label: "待核验",     todo: "无 DB 锚可验，抽查或跑 #2",    cls: "bg-amber-100 text-amber-700" },
   suspicious:     { label: "可疑",       todo: "改解析器",                   cls: "bg-rose-100 text-rose-700" },
   needs_human:    { label: "纯人工",     todo: "无 golden/修复失败",          cls: "bg-gray-200 text-gray-600" },
+  review_hold:    { label: "复核打回",   todo: "锚过但复核 agent 挑出疑点→人审", cls: "bg-red-100 text-red-700" },
 };
 // 待办列表里展示的 reason（不含 routed=可信）
-export const OPEN_REASONS: Reason[] = ["needs_write", "low_confidence", "unverified", "suspicious", "needs_human"];
+export const OPEN_REASONS: Reason[] = ["needs_write", "review_hold", "low_confidence", "unverified", "suspicious", "needs_human"];
 
 export type TriageStatus = "ok" | "open" | "in_progress" | "resolved";
 export type Confidence = "high" | "low" | "unknown";

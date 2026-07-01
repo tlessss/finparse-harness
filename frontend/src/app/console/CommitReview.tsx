@@ -11,7 +11,7 @@ type Commit = {
 
 const STATUSES = [
   { key: "pending", label: "待审", cn: "等人通过" },
-  { key: "approved", label: "已入库", cn: "已写生产库" },
+  { key: "approved", label: "已入库", cn: "已写库" },
   { key: "rejected", label: "已驳回", cn: "未入库" },
 ];
 
@@ -38,7 +38,7 @@ export default function CommitReview() {
     const { data } = await apiPost<{ ok?: boolean; rows_updated?: number; error?: string } | null>(`/commit/${action}`, { id }, null);
     setBusy(null);
     if (data?.error) { setMsg("❌ " + data.error); return; }
-    if (action === "approve") setMsg(`✅ 已入库（financial_reports 更新 ${data?.rows_updated ?? 0} 行）`);
+    if (action === "approve") setMsg(`✅ 已入库（更新 ${data?.rows_updated ?? 0} 行）`);
     load();
   };
 
@@ -46,7 +46,7 @@ export default function CommitReview() {
     <div className="space-y-4">
       <div className="bg-white rounded-lg shadow-sm border p-4">
         <h2 className="font-semibold mb-1">入库审核
-          <span className="text-xs font-normal text-gray-400 ml-2">— LLM 判"完全正确"的项进这里（浅绿），人通过后才写进生产库 financial_reports</span>
+          <span className="text-xs font-normal text-gray-400 ml-2">— 待人审的项进这里（浅绿），通过后写入当前库（见顶部角标）。复核 agent 已 pass 的会自动入库，不进这里</span>
         </h2>
         <div className="flex items-center gap-2 text-sm mt-2">
           {STATUSES.map((s) => (
