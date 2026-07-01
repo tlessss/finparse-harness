@@ -20,9 +20,10 @@ class RndParser(BaseParser):
     def __init__(self, rule: Dict):
         self.rule = rule
 
-    def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
+    def parse(self, pdf_path: str, pre_scan: list = None, code: str = None, year: int = None) -> Dict:
         """
         入参：pdf_path: str；pre_scan: list[dict]|None (引擎抽好的全表；没有就自己 scan_pdf)。
+        code/year 仅为与营收解析器签名统一(本解析器暂不用)。
         返回：见模块顶部。
         """
         all_tables = pre_scan if pre_scan is not None else scan_pdf(pdf_path)

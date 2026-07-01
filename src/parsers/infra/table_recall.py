@@ -23,12 +23,16 @@ _FIELD_QUERY = {
 }
 
 
-def _table_textdoc(table: List[list]) -> str:
-    """把一张表压成"纯文字文档"：去数字/百分比/年份，只留有 ≥2 汉字的单元格，去重保序。"""
-    if not table:
+def _table_textdoc(table: List[list], caption: str = "") -> str:
+    """把一张表压成"纯文字文档"：标题(caption)前置 + 表内去数字/百分比/年份、只留 ≥2 汉字的单元格，去重保序。
+    caption 是表格上文标题（如'（1）营业收入构成'），最点题 → 放最前，既加权语义又保证不被 300 字截掉。"""
+    if not table and not caption:
         return ""
     cells = []
-    for row in table:
+    cap = (caption or "").strip()
+    if cap:
+        cells.append(cap)                          # 标题最点题，放最前
+    for row in (table or []):
         for c in row:
             if not c:
                 continue
@@ -59,7 +63,7 @@ def vector_recall(tables: List[Dict], field: str = "revenue",
     try:
         from src.validators.vector_validator import _embed
         from sklearn.metrics.pairwise import cosine_similarity
-        docs = [_table_textdoc(t.get("table")) for t in tables]
+        docs = [_table_textdoc(t.get("table"), t.get("caption", "")) for t in tables]
         qv = _embed([query])
         dv = _embed(docs)
         sims = cosine_similarity(qv, dv)[0]
@@ -118,7 +122,7 @@ def anchor_select(tables: List[Dict], code: str, year: int,
     返回按"对锚误差"升序的候选 [{**表项, amount_col, anchor_rel, matched}];无锚返回 None(交回退)。"""
     from src.eval.anchors import get_anchors
     key = _ANCHOR_KEY.get(field)
-    anchor = (get_anchors(code, year) or {}).get(key) if key else None
+    anchor = (get_anchors(code, year) or {}).get(key) if (key and code and year) else None
     if not anchor:
         return None
     scored = []

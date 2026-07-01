@@ -46,7 +46,9 @@ class BankRevenueParser(BaseParser):
 
     # ── 公开方法 ──
 
-    def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
+    def parse(self, pdf_path: str, pre_scan: list = None,
+              code: str = None, year: int = None) -> Dict:
+        # code/year 仅为与通用营收解析器签名一致(银行版自走版式化抽表,暂不接选表解耦)
         candidate_pages = self._find_candidate_pages(pdf_path)
         if not candidate_pages:
             return {"revenue_breakdown": None, "status": "no_table_found"}

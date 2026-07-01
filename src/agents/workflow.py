@@ -184,11 +184,11 @@ def node_db_write(state: ParseState) -> Dict:
     if not fields:
         return {"db_write_status": "no_fields"}
     try:
-        from src.database import get_conn, update_report_fields
+        from src.database import get_conn, update_report_fields, reports_table
         conn = get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM financial_reports WHERE stock_code=%s AND report_year=%s "
+                f"SELECT id FROM `{reports_table()}` WHERE stock_code=%s AND report_year=%s "
                 "AND report_quarter='annual' LIMIT 1",
                 (state["stock_code"], state["report_year"]),
             )

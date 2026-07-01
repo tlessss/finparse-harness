@@ -212,9 +212,10 @@ class ReviewManager:
                 stock_code = task["stock_code"]
                 report_year = task["report_year"]
 
-                # 查找 financial_reports 记录
+                # 查找报告记录（走 reports_table 开关，测试时打到镜像表，与写入同表）
+                from src.database import reports_table
                 cur.execute(
-                    "SELECT id FROM financial_reports WHERE stock_code=%s AND report_year=%s AND report_quarter='annual' LIMIT 1",
+                    f"SELECT id FROM `{reports_table()}` WHERE stock_code=%s AND report_year=%s AND report_quarter='annual' LIMIT 1",
                     (stock_code, report_year),
                 )
                 row = cur.fetchone()

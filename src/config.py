@@ -11,6 +11,12 @@ load_dotenv(ROOT / ".env")
 class Config:
     # ── 数据库（复用 caibaoxia）—— 凭据只从 .env 读取，不在代码里硬编码 ──
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+    # 解析结果写入/读取的目标表。**默认安全走测试镜像表**（当前阶段"不碰生产"），
+    # 所有读写打到 financial_reports_test；真要写生产须显式 REPORTS_TABLE=financial_reports。
+    REPORTS_TABLE: str = os.getenv("REPORTS_TABLE", "financial_reports_test")
+    # 复核 agent 判 pass 后是否自动入库(写 REPORTS_TABLE,留痕 source=verify_agent)。
+    # True=自动入库(测试库阶段);设 False 则 pass 只进 commit 队列 pending,等 ⑤ 人审通过才入库。
+    AUTO_COMMIT_ON_VERIFY: bool = os.getenv("AUTO_COMMIT_ON_VERIFY", "true").lower() != "false"
 
     # ── LLM ──
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")

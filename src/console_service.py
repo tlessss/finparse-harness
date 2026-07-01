@@ -225,6 +225,7 @@ def recall_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict
         cands.append({"page": t.get("page"), "recall_score": t.get("recall_score"),
                       "anchor_rel": j.get("anchor_rel"), "amount_col": j.get("amount_col"),
                       "dim_count": _dimension_count(t.get("table")) if sig in ("revenue", "cost") else None,
+                      "caption": (t.get("caption") or "").strip(),   # 表上文标题(已并入召回文档)
                       "doc": _table_textdoc(t.get("table"))[:90]})
     pick = select_table(tables, code, year, sig)
     return {"code": code, "year": year, "field": field, "sig": sig,
@@ -294,6 +295,15 @@ def route_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
         summary = {}
     anchor = (get_anchors(code, year) or {}).get(_DBG_ANCHOR.get(field))
     fp_matched = [c.get("key") for c in cands if fp in (c.get("fingerprints") or [])]
+    # 溯源：routed 版本解析器多不产 cell bbox → 退而给该字段所在表的 PDF 页(select_table 选中页)供对照
+    prov = res.get("溯源") if isinstance(res, dict) else None
+    page = None
+    try:
+        from src.parsers.infra.table_recall import select_table
+        sel = select_table(get_tables(code, year), code, year, _DBG_SIG.get(field, "revenue"))
+        page = (sel or {}).get("page")
+    except Exception:
+        pass
     try:
         from src.eval.test_store import save_test
         save_test("route", code, year, field, status=r["status"], confidence=sig.get("confidence"),
@@ -311,14 +321,16 @@ def route_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
         "tried": r.get("tried"),
         "confidence": sig.get("confidence"), "anchored": sig.get("anchored"), "anchor": anchor,
         "result_summary": summary, "result": res,
+        "page": page, "provenance": prov or {}, "amount_key": getattr(spec, "amount_key", "revenue_yuan"),
     }
 
 
 def parse_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
-    """冷启动解析测试台：强制跑通用(冷启动)解析器(绕过路由) → 各维度对锚，看路由未命中时冷启动行不行。"""
+    """解析测试台（路由优先，和生产 orchestrator 一致）：先②路由(选择即验证)——**命中认证解析器就用它、
+    不再冷启动**；没命中才回退冷启动通用解析器。各维度对锚看解得对不对。"""
     from src.engine_orchestrator import FinParseAI
     from src.eval.field_spec import get_spec
-    from src.parsers.revenue_router import field_plausibility
+    from src.parsers.revenue_router import field_plausibility, route_field
     from src.eval.anchors import get_anchors
     pdf = _pdf_path(code, year)
     if not pdf:
@@ -326,14 +338,30 @@ def parse_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     if get_tables(code, year) is None:
         return {"error": "无缓存（先解析一次该报告）"}
     spec = get_spec(field)
-    parser = FinParseAI()._get_parser(field, pdf)
-    try:
-        out = parser.parse(pdf, pre_scan=get_tables(code, year))
-    except Exception as e:
-        return {"error": "冷启动解析异常: " + str(e)[:120], "parser": type(parser).__name__}
-    data = out.get(field)
+    # 第2步:先路由。命中→用路由结果、**不冷启动**;没命中→冷启动(与生产 orchestrator._route_field 一致)
+    rt = route_field(spec, code, year)
+    routed = rt.get("status") == "routed"
+    if routed:
+        res = rt.get("result")
+        data = res.get(field) if isinstance(res, dict) and field in res else res
+        prov = (res.get("溯源") if isinstance(res, dict) else None) or {}
+        pstatus, parser_name, source = "ok", rt.get("parser_key"), "routed"
+    else:
+        parser = FinParseAI()._get_parser(field, pdf)
+        try:
+            out = parser.parse(pdf, pre_scan=get_tables(code, year), code=code, year=year)
+        except Exception as e:
+            return {"error": "冷启动解析异常: " + str(e)[:120], "parser": type(parser).__name__}
+        data = out.get(field)
+        prov = out.get("溯源") or {}
+        if isinstance(prov.get(field), dict):
+            prov = prov[field]
+        pstatus, parser_name, source = out.get("status"), type(parser).__name__, "cold_start"
     anchors = get_anchors(code, year)
-    sig = field_plausibility(spec, data, anchors)
+    try:
+        sig = field_plausibility(spec, data, anchors)
+    except Exception:
+        sig = {}
     anchor = (anchors or {}).get(_DBG_ANCHOR.get(field))
     amt = getattr(spec, "amount_key", "revenue_yuan")
     dims = []
@@ -343,21 +371,19 @@ def parse_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
             s = sum((r.get(amt) or 0) for r in rows if isinstance(r, dict))
             dims.append({"dim": k, "n": len(rows), "sum": s,
                          "match": bool(anchor and s and abs(s - anchor) <= 0.03 * anchor)})
-    # 溯源(原PDF位置)：解析器直出的 {path:{page,bbox}}；兼容 {field:{path:...}} 嵌套
-    prov = out.get("溯源") or {}
-    if isinstance(prov.get(field), dict):
-        prov = prov[field]
+    # 溯源(原PDF位置)：解析器直出的 {path:{page,bbox}}（prov 上面已按 routed/冷启动取好）
     pages = Counter(v["page"] for v in prov.values() if isinstance(v, dict) and v.get("page"))
     page = pages.most_common(1)[0][0] if pages else None
     try:
         from src.eval.test_store import save_test
-        save_test("parse", code, year, field, status=out.get("status"), confidence=sig.get("confidence"),
-                  summary={"parser": type(parser).__name__, "dims": {d["dim"]: d["n"] for d in dims},
+        save_test("parse", code, year, field, status=pstatus, confidence=sig.get("confidence"),
+                  summary={"parser": parser_name, "source": source, "dims": {d["dim"]: d["n"] for d in dims},
                            "anchored": sig.get("anchored")}, payload={"dims": dims})
     except Exception:
         pass
-    return {"code": code, "year": year, "field": field, "parser": type(parser).__name__,
-            "status": out.get("status"), "anchor": anchor,
+    return {"code": code, "year": year, "field": field, "parser": parser_name,
+            "source": source, "routed": routed, "parser_key": rt.get("parser_key"),
+            "status": pstatus, "anchor": anchor,
             "confidence": sig.get("confidence"), "anchored": sig.get("anchored"),
             "dims": dims, "result": data, "amount_key": amt, "page": page, "provenance": prov}
 
@@ -373,7 +399,7 @@ def judge_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
         return {"error": "无缓存（先解析一次该报告）"}
     parser = FinParseAI()._get_parser(field, pdf)
     try:
-        out = parser.parse(pdf, pre_scan=get_tables(code, year))
+        out = parser.parse(pdf, pre_scan=get_tables(code, year), code=code, year=year)
     except Exception as e:
         return {"error": "解析异常: " + str(e)[:100]}
     value = out.get(field)
@@ -412,7 +438,7 @@ def heal_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     spec = get_spec(field)
     parser = FinParseAI()._get_parser(field, pdf)
     try:
-        out = parser.parse(pdf, pre_scan=get_tables(code, year))
+        out = parser.parse(pdf, pre_scan=get_tables(code, year), code=code, year=year)
     except Exception as e:
         return {"error": "解析异常: " + str(e)[:100]}
     data = out.get(field)
@@ -463,7 +489,7 @@ def heal_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict
     pdf = _pdf_path(code, year)
     parser = FinParseAI()._get_parser(field, pdf)
     try:
-        value = parser.parse(pdf, pre_scan=tables).get(field)
+        value = parser.parse(pdf, pre_scan=tables, code=code, year=year).get(field)
     except Exception:
         value = None
     try:
@@ -550,19 +576,20 @@ def apply_fix(code: str, year: int, field: str, fix: dict) -> Dict:
 def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     """认列测试台：选中表 → 解析器怎么判 名称列/金额列/占比列(内容法 + 表头法 + 最终)。"""
     from src.engine_orchestrator import FinParseAI
-    from src.parsers.infra.table_scanner import filter_by_signature
+    from src.parsers.infra.table_recall import select_table
     tables = get_tables(code, year)
     if not tables:
         return {"error": "无缓存（先解析一次该报告）"}
-    sel = filter_by_signature(tables, _DBG_SIG.get(field, "revenue"))
-    if not sel:
+    # 用选表解耦的同一套 select_table(召回+锚+维度) 选表,和"选表解耦/解析"台一致(不再用旧 filter_by_signature)
+    sel = select_table(tables, code, year, _DBG_SIG.get(field, "revenue"))
+    if not sel or not sel.get("table"):
         return {"error": "没选到目标表"}
-    table = sel[0].get("table") or []
+    table = sel.get("table") or []
     pdf = _pdf_path(code, year)
     p = FinParseAI()._get_parser(field, pdf)
     n_cols = max((len(r) for r in table), default=0)
     out = {"code": code, "year": year, "field": field,
-           "page": sel[0].get("page"),
+           "page": sel.get("page"),
            "table": [[(c or "") for c in row] for row in table[:30]],
            "n_cols": n_cols}
     # 逐列数格子(认列的原始依据)：每列有几个 文字/数字/百分比 单元格
@@ -661,7 +688,7 @@ def judge_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dic
         return {"error": "无缓存（先解析一次该报告）"}
     parser = FinParseAI()._get_parser(field, pdf)
     try:
-        out = parser.parse(pdf, pre_scan=get_tables(code, year))
+        out = parser.parse(pdf, pre_scan=get_tables(code, year), code=code, year=year)
     except Exception as e:
         return {"error": "解析异常: " + str(e)[:100]}
     value = out.get(field)
@@ -701,7 +728,7 @@ def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:
             from src.engine_orchestrator import FinParseAI
             from src.eval.test_store import enqueue_commit
             pdf = _pdf_path(code, year)
-            result = FinParseAI()._get_parser(field, pdf).parse(pdf, pre_scan=get_tables(code, year)).get(field)
+            result = FinParseAI()._get_parser(field, pdf).parse(pdf, pre_scan=get_tables(code, year), code=code, year=year).get(field)
             commit_id = enqueue_commit(code, year, field, result, conf)
         except Exception:
             pass
@@ -709,12 +736,83 @@ def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:
             "issues": issues, "all_ok": all_ok, "commit_id": commit_id}
 
 
+def verify_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """复核对话台（绿灯专用）：解析 → 算锚信号 → 拼好发给**复核 agent** 的 messages(不发送)，返前端编辑。
+    复核 agent 是给'锚已过的绿灯'审盲区用的；非绿灯会附提示但仍允许看 prompt。"""
+    from src.engine_orchestrator import FinParseAI
+    from src.agents.llm_judge import build_verify_messages
+    from src.parsers.revenue_router import field_plausibility
+    from src.eval.anchors import get_anchors
+    from src.eval.field_spec import get_spec
+    pdf = _pdf_path(code, year)
+    if not pdf:
+        return {"error": "无 PDF"}
+    if get_tables(code, year) is None:
+        return {"error": "无缓存（先解析一次该报告）"}
+    parser = FinParseAI()._get_parser(field, pdf)
+    try:
+        out = parser.parse(pdf, pre_scan=get_tables(code, year), code=code, year=year)
+    except Exception as e:
+        return {"error": "解析异常: " + str(e)[:100]}
+    value = out.get(field)
+    prov = out.get("溯源") or {}
+    if isinstance(prov.get(field), dict):
+        prov = prov[field]
+    try:
+        sig = field_plausibility(get_spec(field), value, get_anchors(code, year))
+    except Exception:
+        sig = {}
+    conf = sig.get("confidence")
+    note = "" if conf == "high" else f"注意：此字段当前锚置信={conf}，不是绿灯(锚过)。复核 agent 本是给绿灯审盲区用的。"
+    unit_label = _field_unit_label(code, year, field)
+    messages, grounding = build_verify_messages(field, code, year, value, sig, provenance=prov, unit_label=unit_label)
+    if messages is None:
+        return {"error": "无源文(溯源+RAG都没有),无法复核", "grounding": grounding}
+    return {"code": code, "year": year, "field": field, "grounding": grounding,
+            "unit": unit_label, "messages": messages, "result": value,
+            "confidence": conf, "note": note}
+
+
+def verify_chat(code: str, year: int, field: str, messages: list) -> Dict:
+    """把(可编辑过的)复核 messages 发给复核 agent，记录，返回回复 + 解析出的 pass/hold 裁决。"""
+    from src.agents.llm_client import chat
+    from src.agents.llm_judge import _extract_json
+    try:
+        reply = chat(messages, role="judge", temperature=0.1)
+    except Exception as e:
+        return {"error": "LLM 调用异常: " + str(e)[:120]}
+    v = _extract_json(reply) or {}
+    verdict = v.get("verdict")
+    suspects = v.get("suspects") or v.get("issues") or []
+    passed = True if verdict == "pass" else (False if verdict == "hold" else None)
+    try:
+        from src.eval.test_store import save_chat
+        save_chat(code, year, f"{field}::verify", messages, reply)   # 与 judge 历史分开
+    except Exception:
+        pass
+    # 复核 pass = LLM 逐项对照源文点头 = 终审通过 → 自动入库(测试库,留痕 source=verify_agent)
+    committed = None
+    if verdict == "pass" and field in _COMMIT_COLUMNS:
+        try:
+            from src.engine_orchestrator import FinParseAI
+            from src.eval.triage_queue import _auto_commit
+            pdf = _pdf_path(code, year)
+            result = FinParseAI()._get_parser(field, pdf).parse(
+                pdf, pre_scan=get_tables(code, year), code=code, year=year).get(field)
+            committed = _auto_commit(code, year, field, result, {"confidence": "high"})
+        except Exception as e:
+            committed = f"error:{str(e)[:60]}"
+    return {"reply": reply, "verdict": verdict, "suspects": suspects,
+            "passed": passed, "summary": v.get("summary"), "committed": committed}
+
+
 _COMMIT_COLUMNS = {"revenue_breakdown", "cost_breakdown", "top_clients",
                    "top_suppliers", "employees", "rnd_info"}   # financial_reports 里对应的列
 
 
 def commit_approve(rid: int, note: str = "") -> Dict:
-    """人审通过 → 把解析结果写进生产库 financial_reports.{field}(年报行)。"""
+    """人审通过 → 把解析结果写进报告表 {REPORTS_TABLE}.{field}(年报行)。
+    默认生产 financial_reports；测试时 REPORTS_TABLE=financial_reports_test 则打到镜像表。"""
     from src.eval.test_store import get_commit, set_commit_status
     rec = get_commit(rid)
     if not rec:
@@ -725,13 +823,13 @@ def commit_approve(rid: int, note: str = "") -> Dict:
     if field not in _COMMIT_COLUMNS:
         return {"error": "字段 " + field + " 不支持入库"}
     try:
-        from src.database import get_conn
+        from src.database import get_conn, reports_table
         conn = get_conn()
         try:
             with conn.cursor() as cur:
-                # field 已过白名单,可安全拼列名
+                # field 已过白名单,可安全拼列名；表名走 reports_table 开关(测试打镜像表)
                 cur.execute(
-                    f"UPDATE financial_reports SET {field}=%s, pdf_parsed_at=NOW() "
+                    f"UPDATE `{reports_table()}` SET {field}=%s, pdf_parsed_at=NOW() "
                     "WHERE stock_code=%s AND report_year=%s AND report_quarter='annual'",
                     (rec["result_json"], rec["stock_code"], rec["year"]))
                 n = cur.rowcount

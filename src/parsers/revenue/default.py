@@ -4,15 +4,14 @@
 使用 pdfplumber 提取表格，自动检测列分布。
 """
 
-from typing import List, Dict, Optional
-import pdfplumber
-import fitz
+from typing import Dict, Optional
 
 from src.parsers.base import BaseParser
 from src.parsers.infra.unit_detector import detect_unit, convert_to_yuan
 from src.parsers.infra.table_scanner import is_total_row
 from src.parsers.infra.header_columns import detect_columns_by_header
 from src.parsers.infra.rule_loader import load_rule
+from src.parsers.infra.table_recall import select_table
 
 
 class RevenueParser(BaseParser):
@@ -51,12 +50,12 @@ class RevenueParser(BaseParser):
         yaml_dims = (rule or {}).get("revenue_breakdown", {}).get("dimensions") or {}
         return {**self._FALLBACK_DIMENSIONS, **yaml_dims}    # YAML 覆盖/新增，代码兜底
 
-    def _resolve_columns(self, table: list):
+    def _resolve_columns(self, table: list, amount_hint: Optional[int] = None):
         """
         营收表认列：**表头驱动为唯一主力**（读 revenue.yaml 的 header_aliases）。
         - name/amount/ratio 均以"表头别名命中的列"为准。
-        - 表头没给全时，只用极简兜底（名称=第一个文字列，金额=第一个金额列），
-          不再跑历史包袱式的整套统计法 _detect_columns（它只留给调试台做"内容法"对照）。
+        - amount 表头没命中时，优先用选表解耦锚定的金额列 amount_hint（select_table 已用锚验过），
+          再退极简兜底（第一个金额列）。name 兜底=第一个文字列。
         - ratio 闸门保持：表头命中"占营业收入比重"类别名才取，绝不拿毛利率顶替。
         """
         aliases = self._header_aliases()
@@ -66,6 +65,8 @@ class RevenueParser(BaseParser):
         ratio_col = hdr.get("ratio")        # 闸门：表头命中占比别名才取
         if name_col is None:
             name_col = self._first_text_col(table)
+        if amount_col is None:
+            amount_col = amount_hint        # 锚定金额列兜底(比统计法可靠)
         if amount_col is None:
             amount_col = self._first_money_col(table, exclude={name_col, ratio_col})
         return name_col, amount_col, ratio_col
@@ -91,194 +92,29 @@ class RevenueParser(BaseParser):
                 return c
         return None
 
-    def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
-        # 优先用缓存(已跨页拼接完整)的表 + caption 选表 —— 避免自抽截断
-        # (000333 自抽只到17行,漏分地区/分销售模式;缓存拼接表是22行完整的)
-        if pre_scan:
-            r = self._parse_from_prescan(pre_scan)
-            if r is not None:
-                return r
-
-        candidate_pages = self._find_candidate_pages(pdf_path)
-        if not candidate_pages:
+    def parse(self, pdf_path: str = None, pre_scan: list = None,
+              code: str = None, year: int = None) -> Dict:
+        """营收解析 = 选表解耦 + 认列切桶。
+        选表逻辑不再内嵌本解析器：全权委托 select_table（① 向量召回 → ② 锚精判定表定金额列 →
+        ③ 维度数闸）。本解析器只负责"给定选中表 → 结构化"（认列、切桶、溯源）。
+        code/year 用于取锚做精判；缺省时 select_table 优雅退回纯语义召回（recall_only）。"""
+        if not pre_scan:
             return {"revenue_breakdown": None, "status": "no_table_found"}
 
-        tables = self._extract_tables(pdf_path, candidate_pages)
-        revenue_tables = self._filter_revenue_tables(tables)
-        if not revenue_tables:
+        sel = select_table(pre_scan, code, year, "revenue")
+        if not sel or not sel.get("table"):
             return {"revenue_breakdown": None, "status": "no_table_found"}
 
-        unit_ratio = self._detect_unit_from_pdf(pdf_path, candidate_pages)
-        best = self._select_best_table(revenue_tables)
-        result, provenance = self._classify(best, unit_ratio=unit_ratio)
-        return {"revenue_breakdown": result, "溯源": provenance, "status": "ok"}
+        table = sel["table"]
+        unit_ratio = detect_unit((sel.get("caption", "") or "") + " " + (sel.get("text", "") or ""))
+        # 溯源：选中表自带的 (页码, cell_bbox)
+        self._bbox_map = {id(table): (sel.get("page"), sel.get("cell_bbox"))}
+        result, provenance = self._classify(
+            table, unit_ratio=unit_ratio, amount_hint=sel.get("amount_col"))
+        return {"revenue_breakdown": result, "溯源": provenance,
+                "status": "ok", "_select_via": sel.get("via")}
 
-    def _parse_from_prescan(self, pre_scan: list) -> Optional[Dict]:
-        """用缓存表(scan_pdf 的完整拼接结果) + caption 选表 → 解析。失败返回 None 让上层回退自抽。"""
-        from src.parsers.infra.table_scanner import filter_by_signature
-        from src.parsers.infra.unit_detector import detect_unit
-        cands = filter_by_signature(pre_scan, "revenue")
-        if not cands:
-            return None
-        top = cands[0]
-        best = top["table"]
-
-        item = next((x for x in pre_scan if x.get("table") is best), None)
-        unit_text = (item.get("caption", "") + " " + item.get("text", "")) if item else ""
-        unit_ratio = detect_unit(unit_text)
-        # 溯源:用缓存表自带的 cell_bbox
-        self._bbox_map = {id(best): (top.get("page"), (item or {}).get("cell_bbox"))} if item else {}
-        result, provenance = self._classify(best, unit_ratio=unit_ratio)
-        return {"revenue_breakdown": result, "溯源": provenance, "status": "ok"}
-
-    def _select_best_table(self, tables: list) -> list:
-        """
-        M2 A/B 表择优：在已按分数排序的候选表里，优先选 (A) 占比构成表，
-        其次才退回最高分表（可能是 (B) 毛利率表）。
-        —— 解决"挑错表"（如徐工挑到毛利率表）。
-        """
-        rule = load_rule("revenue")
-        if not rule:
-            return tables[0]
-        rb = rule.get("revenue_breakdown", {})
-        from src.parsers.infra.header_columns import classify_revenue_table
-        comps = [t for t in tables if classify_revenue_table(t, rb) == "composition"]
-        return comps[0] if comps else tables[0]
-
-    # ── 以下方法完全来自原 revenue_parser.py ──
-
-    def _find_candidate_pages(self, pdf_path: str) -> List[int]:
-        """
-        找页（规范驱动）：按信号强度打分取 top-N 页，不再按页码盲截断。
-        有规则走 SectionLocator；无规则回退旧关键词逻辑。
-        """
-        rule = load_rule("revenue")
-        fp = (rule or {}).get("revenue_breakdown", {}).get("find_page") if rule else None
-        if fp:
-            from src.parsers.infra.section_locator import rank_pages
-            pages = rank_pages(
-                pdf_path,
-                strong=fp.get("strong", []),
-                weak=fp.get("weak", []),
-                prefer_section=fp.get("prefer_section"),
-                min_page=fp.get("min_page", 1),
-                top_n=fp.get("top_n", 12),
-                window=fp.get("window", 1),
-            )
-            if pages:
-                return pages
-        return self._find_candidate_pages_legacy(pdf_path)
-
-    def _find_candidate_pages_legacy(self, pdf_path: str) -> List[int]:
-        _REVENUE_KEYWORDS = [
-            "营业收入", "营收", "主营业务", "收入构成",
-            "分产品", "分行业", "分地区", "收入与成本",
-            "收入和成本", "经营情况",
-        ]
-        try:
-            doc = fitz.open(pdf_path)
-        except Exception:
-            return []
-
-        candidates = set()
-        for pn in range(len(doc)):
-            text = doc[pn].get_text("text")
-            for kw in _REVENUE_KEYWORDS:
-                if kw in text:
-                    candidates.add(pn + 1)
-                    if pn > 0:
-                        candidates.add(pn)
-                    if pn < len(doc) - 1:
-                        candidates.add(pn + 2)
-                    break
-
-        doc.close()
-        candidates = {p for p in candidates if p >= 16}
-        return sorted(candidates)[:15]
-
-    def _extract_tables(self, pdf_path: str, pages: List[int]) -> list:
-        """抽候选表。改用 find_tables 以保留每格坐标，旁挂到 _bbox_map 供溯源（M1）。
-        返回值仍是 2D 字符串网格列表（不改下游筛选/认列逻辑）。"""
-        self._bbox_map = {}   # id(grid) -> (page, cell_bbox)，靠对象身份关联，下游只重排不拷贝
-        all_tables = []
-        with pdfplumber.open(pdf_path) as pdf:
-            for pn in pages:
-                if pn - 1 >= len(pdf.pages):
-                    continue
-                for tbl in pdf.pages[pn - 1].find_tables():
-                    try:
-                        t = tbl.extract()
-                    except Exception:
-                        continue
-                    if not t:
-                        continue
-                    text = " ".join(c.replace("\n", " ") for row in t for c in row if c)
-                    if ("分产品" in text or "分行业" in text or "分地区" in text) and len(t) >= 5:
-                        cell_bbox = []
-                        for ri, row in enumerate(tbl.rows):
-                            cells = getattr(row, "cells", None) or []
-                            brow = [tuple(c) if c else None for c in cells]
-                            # 对齐到与 t[ri] 同长
-                            need = len(t[ri]) if ri < len(t) else len(brow)
-                            cell_bbox.append([brow[ci] if ci < len(brow) else None for ci in range(need)])
-                        self._bbox_map[id(t)] = (pn, cell_bbox)
-                        all_tables.append(t)
-        return all_tables
-
-    def _filter_revenue_tables(self, tables: list) -> list:
-        scored = []
-        for t in tables:
-            score = 0
-            text = " ".join(c.replace("\n", " ") for row in t for c in row if c)
-            nc, ac, rc = self._detect_columns(t)
-
-            if rc is not None:
-                score += 35
-            if ac is not None:
-                score += 25
-            if "营业收入" in text:
-                score += 20
-            elif "营收" in text:
-                score += 10
-            if "同比" in text or "增减" in text:
-                score += 10
-            if "分产品" in text or "分行业" in text or "分地区" in text:
-                score += 30
-            rc2 = len(t)
-            if 8 <= rc2 <= 30:
-                score += 10
-            elif rc2 > 30:
-                score -= 10
-            names = sum(1 for row in t for c in row if c and any(
-                '\u4e00' <= ch <= '\u9fff' for ch in c) and len(c) >= 2)
-            if names >= 5:
-                score += 10
-            if "员工" in text and "人数" in text:
-                score -= 30
-            if "供应商" in text:
-                score -= 20
-            if "研发" in text:
-                score -= 20
-
-            nc_check, ac_check, rc_check = self._detect_columns(t)
-            if rc_check is not None:
-                max_r = 0
-                for row in t:
-                    if rc_check < len(row):
-                        v = row[rc_check]
-                        if v and "%" in v:
-                            try:
-                                max_r = max(max_r, abs(float(v.replace("%","").replace(",","").strip())))
-                            except ValueError:
-                                pass
-                if max_r > 100:
-                    continue
-
-            if score >= 40:
-                scored.append((score, t))
-
-        scored.sort(key=lambda x: -x[0])
-        return [t for _, t in scored]
+    # ── 认列（内容统计法）：仅供调试台"内容法 vs 表头法"对照，不参与生产选列 ──
 
     def _detect_columns(self, table: list) -> tuple:
         num_cols = max(len(row) for row in table) if table else 0
@@ -352,7 +188,7 @@ class RevenueParser(BaseParser):
 
         return name_col, amount_col, ratio_col
 
-    def _classify(self, table: list, unit_ratio: int = 1) -> Dict:
+    def _classify(self, table: list, unit_ratio: int = 1, amount_hint: Optional[int] = None) -> Dict:
         # 切桶标记从 revenue.yaml 的 dimensions 读(自愈"改规则"的旋钮);代码兜底防 YAML 缺失。
         section_labels = self._section_labels()
         sections = []
@@ -364,7 +200,7 @@ class RevenueParser(BaseParser):
                     break
             sections.append(found)
 
-        name_col, amount_col, ratio_col = self._resolve_columns(table)
+        name_col, amount_col, ratio_col = self._resolve_columns(table, amount_hint=amount_hint)
 
         # 溯源：取该表的 (页码, 坐标网格)（_extract_tables 旁挂）
         page, cell_bbox = getattr(self, "_bbox_map", {}).get(id(table), (None, None))
@@ -494,23 +330,3 @@ class RevenueParser(BaseParser):
             return float(s)
         except ValueError:
             return None
-
-    @staticmethod
-    def _detect_unit_from_pdf(pdf_path: str, pages: List[int]) -> int:
-        try:
-            doc = fitz.open(pdf_path)
-            scan_pages = set(pages)
-            for p in pages:
-                scan_pages.add(p - 1)
-                scan_pages.add(p + 1)
-            for pn in sorted(scan_pages):
-                if 1 <= pn <= len(doc):
-                    text = doc[pn - 1].get_text("text")
-                    ratio = detect_unit(text)
-                    if ratio != 1:
-                        doc.close()
-                        return ratio
-            doc.close()
-        except Exception:
-            pass
-        return 1

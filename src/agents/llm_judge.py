@@ -61,8 +61,13 @@ def retrieve_source(code: str, year: int, field: str, top_k: int = 4) -> str:
     return "\n---\n".join(h["content"] for h in hits)
 
 
+# 溯源抠图向上多带的"表头带"高度(pt)。要够高才能带上"本期数/上期数/年份/占营业收入比重"等列标题——
+# 否则 LLM 拿不到期间锚点，会对"两组并排数据"臆测年份（比亚迪把左右两组编成 2023/2022 的幻觉即此）。
+_HEADER_BAND_PT = 78
+
+
 def _source_from_provenance(code: str, year: int, prov: Dict) -> str:
-    """主路：按溯源(page+bbox)从 PDF 抠出**值出处的原表区域文本**(比模糊 RAG 精准)。"""
+    """主路：按溯源(page+bbox)从 PDF 抠出**值出处的原表区域文本**(比模糊 RAG 精准)，向上多抠一段表头带。"""
     if not prov:
         return ""
     by_page: Dict = {}
@@ -84,7 +89,7 @@ def _source_from_provenance(code: str, year: int, prov: Dict) -> str:
         if not (0 <= idx < len(doc)):
             continue
         x0 = min(b[0] for b in bbs) - 8
-        y0 = min(b[1] for b in bbs) - 25               # 上扩，带上表头
+        y0 = min(b[1] for b in bbs) - _HEADER_BAND_PT  # 上扩一整段"表头带"：带上 本期/上期/年份/占比 等列标题
         x1 = max(b[2] for b in bbs) + 8
         y1 = max(b[3] for b in bbs) + 8
         parts.append(doc[idx].get_text("text", clip=fitz.Rect(x0, y0, x1, y1)))
@@ -148,6 +153,77 @@ def judge_field(field: str, code: str, year: int, field_value,
         verdict["_prompt"] = messages[1]["content"]
         verdict["_raw"] = raw
     return verdict
+
+
+# ── 复核 agent（绿灯专用）──
+# 与 judge_field 是"反立场兄弟"：judge_field 面对锚对不上的可疑数据、默认疑、找病根；
+# 本 agent 面对锚已过的绿灯、默认信、只审锚证明不了的盲区。锚不再是"过就免审"——绿灯全量
+# 过这个 agent，它点头(pass)才算真过。跨表锚只证明了"表选对 + 至少一维金额合计≈营业收入"，
+# 对"其他维度完整性 / 摘行质量 / '其中'重复计数 / 名称脏 / 占比合理"零覆盖，正是这里要审的。
+
+_SYS_VERIFY = ("你是严谨的 A 股年报数据复核员。你的任务：把解析出的结构化结果**逐项拿到源文表格里对照**，"
+               "核对每个名称/金额/占比是否与表格一致。跨表锚已保证'表选对、每个维度合计都≈营业收入'，"
+               "所以总额、选表、维度是否漏行/串行你不必再核——只管逐项比对数据与源文表格。"
+               "宁可放过也别乱改，只输出 JSON，不要解释。")
+
+
+def build_verify_messages(field: str, code: str, year: int, field_value, sig: Dict,
+                          provenance: Dict = None, spec=None, unit_label: str = None):
+    """构造发给复核 agent 的 messages。返回 (messages|None, grounding)。
+    sig: 该字段的 field_plausibility 信号（带 anchor / parsed_total，用来告诉 agent 锚证明了什么）。"""
+    prov = _ensure_prov(field, code, year, field_value, provenance, spec)
+    source, grounding = _source_from_provenance(code, year, prov), "溯源原表"
+    if not source:
+        source, grounding = retrieve_source(code, year, field), "RAG检索"
+    if not source:
+        return None, grounding
+    anchor = (sig or {}).get("anchor")
+    anchor_note = ""
+    if anchor:
+        anchor_note = (f"\n【锚已确认】权威营业收入≈{anchor:,.0f} 元，解析的**每个维度**合计都对上了(±3%内)"
+                       f"——说明表选对了、金额列/单位没错、且各维度切分**完整**(漏行/串行会让维度和对不上、"
+                       f"过不了这关)。**别再校总额，也别再怀疑维度漏行/串行——锚已保证。**\n")
+    unit_note = ""
+    if unit_label:
+        unit_note = (f"\n【单位提示】源文金额单位为「{unit_label}」；解析结果已换算为「元」，"
+                     f"对照前先换算，别因单位不同误判。\n")
+    prompt = (
+        f"年报源文（{grounding}，权威）：\n{source}\n{anchor_note}{unit_note}\n"
+        f"待复核的解析结果（字段 {field}）：\n"
+        f"{json.dumps(field_value, ensure_ascii=False, indent=2)}\n\n"
+        f"请把**解析结果的每一项(名称/金额/占比)逐一拿到上面源文表格里对照**，看数据和表格对不对得上：\n"
+        f"名称有没有抠错/串到别行、金额有没有取错格(取到隔壁列或上期那一列)、占比对不对、"
+        f"有没有把'其中：X'这类子项当成顶层项、把合计行当明细行混进来。\n"
+        f"（总额和各维度切分是否完整——跨表锚已保证，这些不用你再核；你只管**逐项比对数据与源文表格是否一致**。）\n"
+        f"⚠ 只依据源文里**真实出现**的文字判断；源文没写的信息（尤其**年份/期间**）**绝不臆测**——"
+        f"表里若是两组数据并排、又没标年份，就用'第一组/第二组（左/右）'或'本期/上期'描述，**不要编造'20XX年'**。\n"
+        f"每一项都能在表格里对上就判 pass；发现对不上的才 hold，别为改而改。\n"
+        '只输出 JSON：{"verdict":"pass|hold","suspects":[{"field":"如segments[2].revenue_yuan",'
+        '"issue":"name_error|amount_error|ratio_bad|dup_count|extra_row|other",'
+        '"reason":"源文表格里的正确值/依据"}],"summary":"一句话结论"}'
+    )
+    return [{"role": "system", "content": _SYS_VERIFY}, {"role": "user", "content": prompt}], grounding
+
+
+def verify_field(field: str, code: str, year: int, field_value, sig: Dict = None,
+                 provenance: Dict = None, spec=None, debug: bool = False, unit_label: str = None) -> Dict:
+    """复核 agent：对**锚已过的绿灯**逐字段复核锚的盲区。pass=真可信→可入库；hold=有疑点→送人审。
+    无源文可对照时判 unknown（既不放行也不拦，交回人工），不因缺证据误杀绿灯。"""
+    messages, grounding = build_verify_messages(field, code, year, field_value, sig, provenance, spec, unit_label)
+    if messages is None:
+        return {"verdict": "unknown", "suspects": [], "field": field,
+                "summary": "溯源+RAG均无源文，无法复核", "_system": _SYS_VERIFY if debug else None}
+    raw = chat(messages, role="judge", temperature=0.1)
+    v = _extract_json(raw)
+    # 复核 agent 的裁决字段是 verdict=pass|hold；_extract_json 失败会给 verdict=unknown，透传即可
+    v.setdefault("suspects", v.get("issues", []))
+    v["field"] = field
+    v["grounding"] = grounding
+    if debug:
+        v["_system"] = _SYS_VERIFY
+        v["_prompt"] = messages[1]["content"]
+        v["_raw"] = raw
+    return v
 
 
 def review_queue(reason: str = "low_confidence", limit: int = 20) -> List[Dict]:

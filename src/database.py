@@ -1,6 +1,7 @@
 """数据库连接层 — 复用 caibaoxia 库"""
 
 import json
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
@@ -45,6 +46,44 @@ def get_conn():
     )
 
 
+# ── 目标表（生产 / 测试镜像）──────────────────────
+# 所有对报告表的读写都过 reports_table()，由 REPORTS_TABLE 开关决定打到生产还是测试镜像表。
+# 表名只允许字母/数字/下划线（防注入：它被直接拼进 SQL，不能走参数占位）。
+_TABLE_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def reports_table() -> str:
+    t = Config.REPORTS_TABLE or "financial_reports"
+    if not _TABLE_RE.match(t):
+        raise ValueError(f"非法表名 REPORTS_TABLE={t!r}（只允许字母/数字/下划线）")
+    return t
+
+
+def ensure_test_table(source: str = "financial_reports", copy_data: bool = True) -> dict:
+    """建镜像测试表（CREATE TABLE ... LIKE 完全同构）+ 可选把生产数据整表复制过来（含 id，
+    这样按 id 的 SELECT/UPDATE 与生产完全一致）。幂等：表已存在不重建；有数据不重复灌。
+    安全闸：REPORTS_TABLE 必须已切到非生产表，且 != source，否则拒绝（绝不动生产表）。"""
+    target = reports_table()
+    if not _TABLE_RE.match(source):
+        raise ValueError(f"非法 source 表名 {source!r}")
+    if target == source:
+        raise RuntimeError(f"REPORTS_TABLE 仍指向生产表 {source}；请先设 REPORTS_TABLE=financial_reports_test")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE IF NOT EXISTS `{target}` LIKE `{source}`")
+            cur.execute(f"SELECT COUNT(*) AS n FROM `{target}`")
+            existing = cur.fetchone()["n"]
+            copied = 0
+            if copy_data and existing == 0:
+                cur.execute(f"INSERT INTO `{target}` SELECT * FROM `{source}`")
+                copied = cur.rowcount
+            conn.commit()
+        return {"target": target, "source": source, "existing_rows": existing, "copied_rows": copied}
+    finally:
+        conn.close()
+
+
 def json_serialize(obj):
     if isinstance(obj, (Decimal,)):
         return float(obj)
@@ -72,7 +111,7 @@ def get_report(report_id: int) -> Optional[dict]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM financial_reports WHERE id = %s", (report_id,))
+            cur.execute(f"SELECT * FROM `{reports_table()}` WHERE id = %s", (report_id,))
             return cur.fetchone()
     finally:
         conn.close()
@@ -88,7 +127,7 @@ def list_reports(
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            parts = ["SELECT fr.* FROM financial_reports fr WHERE 1=1"]
+            parts = [f"SELECT fr.* FROM `{reports_table()}` fr WHERE 1=1"]
             params = []
             if stock_code:
                 parts.append("AND fr.stock_code = %s")
@@ -115,7 +154,7 @@ def update_report_field(report_id: int, field: str, value):
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False, default=json_serialize)
             cur.execute(
-                f"UPDATE financial_reports SET {field} = %s, updated_at = NOW() WHERE id = %s",
+                f"UPDATE `{reports_table()}` SET {field} = %s, updated_at = NOW() WHERE id = %s",
                 (value, report_id),
             )
             conn.commit()
@@ -137,9 +176,14 @@ def update_report_fields(report_id: int, fields: dict):
                 vals.append(value)
             vals.append(report_id)
             cur.execute(
-                f"UPDATE financial_reports SET {', '.join(sets)}, updated_at = NOW() WHERE id = %s",
+                f"UPDATE `{reports_table()}` SET {', '.join(sets)}, updated_at = NOW() WHERE id = %s",
                 vals,
             )
             conn.commit()
     finally:
         conn.close()
+
+
+if __name__ == "__main__":
+    # 建测试镜像表：REPORTS_TABLE=financial_reports_test python3 -m src.database
+    print(ensure_test_table())

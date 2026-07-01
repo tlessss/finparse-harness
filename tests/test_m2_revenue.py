@@ -21,16 +21,26 @@ MARGIN = [
 ]
 
 
-def test_select_prefers_composition():
+# 注：A/B 表择优已从解析器上移到"选表解耦"(select_table 的锚+维度闸)，
+# 解析器只负责"给定选中表→结构化"。这里改测新接缝：认列的占比闸门不把毛利率当占比。
+def test_resolve_ratio_gate_rejects_margin():
     p = RevenueParser({})
-    # 候选里同时有 B 和 A（B 排前）→ 应择优选 A 占比表
-    assert p._select_best_table([MARGIN, COMPOSITION]) is COMPOSITION
+    # 毛利率表:金额列仍认到营业收入(1)，但占比列必须为 None(绝不拿毛利率顶替占比)
+    name_col, amount_col, ratio_col = p._resolve_columns(MARGIN)
+    assert amount_col == 1
+    assert ratio_col is None
+    # → 分桶后毛利率不会被误当占比写进 ratio_pct
+    result, _ = p._classify(MARGIN, unit_ratio=1)
+    assert all(item["ratio_pct"] is None for item in result["segments"])
 
 
-def test_select_falls_back_to_margin_only():
+def test_resolve_takes_true_composition_ratio():
     p = RevenueParser({})
-    # 只有 B → 退回 B（不会凭空造占比）
-    assert p._select_best_table([MARGIN]) is MARGIN
+    # 占比构成表:占营业收入比重列正常认到(2)，分桶后 ratio_pct 有值
+    name_col, amount_col, ratio_col = p._resolve_columns(COMPOSITION)
+    assert (amount_col, ratio_col) == (1, 2)
+    result, _ = p._classify(COMPOSITION, unit_ratio=1)
+    assert [item["ratio_pct"] for item in result["segments"]] == [60.0, 40.0]
 
 
 def test_by_channel_dimension_validated():

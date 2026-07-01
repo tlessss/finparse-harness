@@ -17,7 +17,7 @@ import time
 from typing import Dict, List, Optional
 
 _QUEUE = "goldset/triage_queue.json"
-REASONS = ("needs_write", "low_confidence", "unverified", "suspicious", "needs_human")
+REASONS = ("needs_write", "low_confidence", "unverified", "suspicious", "needs_human", "review_hold")
 _GOOD = ("ok", "resolved")
 
 
@@ -44,7 +44,7 @@ def _key(r: Dict):
 def _sig(signal) -> Optional[Dict]:
     if not isinstance(signal, dict):
         return None
-    return {k: signal[k] for k in ("clean", "confidence", "anchored", "anchor", "diff_pct")
+    return {k: signal[k] for k in ("clean", "confidence", "anchored", "anchor", "diff_pct", "verify", "committed")
             if k in signal}
 
 
@@ -153,13 +153,54 @@ def triage_report(code: str, year: int, fields: List[str] = None) -> List[Dict]:
             out.append(enqueue(code, year, fname, "needs_write", sig))      # 红:没解析器
         elif rt["status"] == "routed":
             conf = sig.get("confidence")
-            if conf == "high":                       # 绿:锚验证过(分项和≈DB权威值)→ 真可信
-                out.append(record_ok(code, year, fname, sig))
+            if conf == "high":                       # 锚过(某维度和≈DB锚)不再直接算可信 →
+                # 交复核 agent 审锚的盲区(其他维度/摘行/重复/名称/占比)。它点头才绿灯入库。
+                out.append(_verify_green(code, year, fname, spec, rt, sig))
             elif conf == "low":                      # 橙:锚对不上 → 可疑
                 out.append(enqueue(code, year, fname, "low_confidence", sig))
             else:                                    # 黄:路由过硬规则但无DB锚可验 → 待核验
                 out.append(enqueue(code, year, fname, "unverified", sig))
     return out
+
+
+def _verify_green(code: str, year: int, field: str, spec, rt: Dict, sig: Dict) -> Dict:
+    """锚过的绿灯 → 复核 agent。pass→record_ok(真绿)；hold→enqueue(review_hold,送人审)；
+    unknown(无源文可对照)→保持绿但标注(不因缺证据误杀)。复核 agent 挂了也不阻断,退回旧绿。"""
+    from src.eval.field_spec import get_spec
+    value = rt.get("result")
+    if isinstance(value, dict) and field in value:      # 富结构解包到该字段值
+        value = value[field]
+    try:
+        from src.agents.llm_judge import verify_field
+        v = verify_field(field, code, year, value, sig=sig, spec=spec or get_spec(field))
+    except Exception as e:
+        return record_ok(code, year, field, {**(sig or {}), "verify": f"error:{e}"})
+    verdict = v.get("verdict")
+    if verdict == "hold":                               # 复核挑出实锤疑点 → 打回人审
+        return enqueue(code, year, field, "review_hold", sig, note=v.get("summary", ""))
+    # pass → 真绿:复核 agent(LLM逐项对照源文)点头 = 终审通过 → 自动入库(测试库,留痕)
+    # unknown(无源文可对照) → 保持绿但不入库(未经LLM确认,不因缺证据既不放行也不误入库)
+    committed = None
+    if verdict == "pass":
+        try:
+            committed = _auto_commit(code, year, field, value, sig)
+        except Exception as e:
+            committed = f"error:{str(e)[:60]}"
+    return record_ok(code, year, field, {**(sig or {}), "verify": verdict, "committed": committed})
+
+
+def _auto_commit(code: str, year: int, field: str, value, sig: Dict):
+    """复核 pass → 入库。走现有 commit 机制:enqueue_commit(留痕 source=verify_agent) → commit_approve
+    (写 REPORTS_TABLE 测试库)。Config.AUTO_COMMIT_ON_VERIFY=False 时只入队 pending,等 ⑤ 人审。
+    返回状态串写进台账 signal.committed。"""
+    from src.eval.test_store import enqueue_commit
+    from src.config import Config
+    rid = enqueue_commit(code, year, field, value, confidence=(sig or {}).get("confidence"), source="verify_agent")
+    if not Config.AUTO_COMMIT_ON_VERIFY:
+        return f"pending#{rid}"                          # 保留人审:只入队,不自动写库
+    from src.console_service import commit_approve
+    r = commit_approve(rid, note="复核agent自动通过")
+    return "committed" if r.get("ok") else f"commit_err:{str(r.get('error'))[:50]}"
 
 
 def db_needs_write(field_col: str, year: int = 2025, limit: int = 200) -> List[str]:

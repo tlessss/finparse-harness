@@ -13,9 +13,10 @@ class TopSupplierParser(BaseParser):
     def __init__(self, rule: Dict):
         self.rule = rule
 
-    def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
+    def parse(self, pdf_path: str, pre_scan: list = None, code: str = None, year: int = None) -> Dict:
         """
         一次解出"前五大客户"和"前五大供应商"两个字段。
+        code/year 仅为与营收解析器签名统一(本解析器暂不用)。
 
         入参：pdf_path: str；pre_scan: list[dict]|None。
         返回：{"top_clients": {...}|None, "top_suppliers": {...}|None, "status": ...}

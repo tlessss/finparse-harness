@@ -86,8 +86,8 @@ def _parsed_total(spec: FieldSpec, value):
 
 
 def _attach_confidence(spec: FieldSpec, value, anchors, sig: Dict) -> Dict:
-    """跨表锚 → 置信度。分项和≈锚(DB营收/成本/研发,±3%)=high；没锚上=low；无锚=unknown。
-    只加信号、不改 clean —— 路由仍按硬规则,只是把'凑巧达标却对不上锚'的标低置信→送 #2 复核。"""
+    """跨表锚 → 置信度。B类:合计≈锚；A类(营收/成本):**每个维度和都≈锚(all,±3%)** 才 high；
+    对不上=low；无锚=unknown。只加信号、不改 clean —— 路由仍按硬规则,低置信送 #2 复核。"""
     key = getattr(spec, "anchor_key", "")
     anchor = (anchors or {}).get(key) if key else None
     if not anchor:
@@ -97,12 +97,13 @@ def _attach_confidence(spec: FieldSpec, value, anchors, sig: Dict) -> Dict:
         total = (value or {}).get(spec.total_key)
         anchored = bool(total and abs(total - anchor) <= 0.03 * anchor)
     else:
-        # A 类：各维度(行业/产品/地区/销售模式)是同一营收总额的不同切分 → **任一维度和≈锚即过锚**。
-        # 某维度抓串/漏行(如000333的segments)不该否定整体；旧的"取最大维度"会被抓大的坏维度毒化。
+        # A 类：各维度(行业/产品/地区/销售模式)是同一营收总额的不同切分。
+        # 标准=**all**：每个解析出的维度合计都要≈锚才过锚(正确率优先)。某维度串/漏行→它的合计
+        # 对不上→整体不过锚→送诊断,不再像旧的 any 那样被单个维度蒙混过关。空维度不算过。
         dim_sums = [s for s in (sum((r.get(spec.amount_key) or 0) for r in (rows or []))
                                 for rows in as_dims(value, spec).values()) if s]
-        anchored = any(abs(s - anchor) <= 0.03 * anchor for s in dim_sums)
-        total = min(dim_sums, key=lambda s: abs(s - anchor)) if dim_sums else None  # 展示:最接近锚的维度和
+        anchored = bool(dim_sums) and all(abs(s - anchor) <= 0.03 * anchor for s in dim_sums)
+        total = max(dim_sums, key=lambda s: abs(s - anchor)) if dim_sums else None  # 展示:离锚最远的维度(决定成败)
     sig["anchored"] = anchored
     sig["confidence"] = "high" if anchored else "low"
     sig["anchor"] = anchor

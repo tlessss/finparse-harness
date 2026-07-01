@@ -126,7 +126,9 @@ class FinParseAI:
         _stage("营收")
         rev_result = self._route_field(REVENUE, stock_code, report_year, all_tables)
         if rev_result is None:
-            rev_result = rev_parser.parse(pdf_path, pre_scan=all_tables)
+            # 冷启动营收:把 code/year 透传给解析器,让选表解耦(select_table)能取锚做精判
+            rev_result = rev_parser.parse(pdf_path, pre_scan=all_tables,
+                                          code=stock_code, year=report_year)
         # 研发
         _stage("研发")
         rnd_result = self._route_field(RND, stock_code, report_year, all_tables)
@@ -228,9 +230,11 @@ class FinParseAI:
         else:
             statuses.append("supplier_missing")
 
-        # ── 质检关：对每个字段输出(routed/cold_start)统一过跨表锚，避免错数据静默入库 ──
-        #   认证路由=认证背书→写库；冷启动=无背书→锚明确判错(confidence=low)就不写库、标记送审
-        #   (只挡"锚说它错"的，不误伤无DB锚可验的；数据仍留 output 供人审，只是不持久化)
+        # ── 质检关：入库裁决权移交 LLM，锚不再当"终审开关" ──
+        #   认证路由=认证背书→当场写库；冷启动=无背书→**一律不当场写**：
+        #     锚过(high)也不算过,要过异步"复核 agent"审锚的盲区(见 triage._verify_green);
+        #     无锚(unknown)要人核验;锚判错(low)本就不写。数据仍留 output 供分诊层复核后再入库。
+        #   —— 堵住旧的"某维度和≈锚就静默入库"漏洞(任一维度对上,其余维度错了也曾一起写库)。
         from src.parsers.revenue_router import field_plausibility
         from src.eval.anchors import get_anchors
         _anchors = get_anchors(stock_code, report_year) if stock_code else {}
@@ -248,15 +252,18 @@ class FinParseAI:
                 _sig = field_plausibility(_spec, _val, _anchors)
             except Exception:
                 _sig = {}
-            _trust = _routed or _sig.get("confidence") != "low"   # 路由背书 或 锚没判它错
+            _conf = _sig.get("confidence")
+            _trust = _routed                              # 只有认证路由当场写库；冷启动全交复核层
+            # 冷启动待办:锚过→待复核 agent；其余→待人核验。给分诊层/控制台一个明确的交接标记。
+            _pending = None if _routed else ("verify" if _conf == "high" else "review")
             output["signals"][_f] = {
                 "source": "routed" if _routed else "cold_start",
-                "confidence": _sig.get("confidence"), "clean": _sig.get("clean"),
+                "confidence": _conf, "clean": _sig.get("clean"),
                 "anchored": _sig.get("anchored"), "anchor": _sig.get("anchor"),
-                "written": bool(_trust),
+                "written": bool(_trust), "pending": _pending,
             }
             if _f in db_fields and not _trust:
-                del db_fields[_f]        # 冷启动且锚判错 → 不写库(宁缺毋滥，正确率优先)
+                del db_fields[_f]        # 冷启动一律不当场写(宁缺毋滥,正确率优先;等复核层裁决)
 
         # parse_flags 形如 {rev: ok, rnd: missing, ...}；field_count = 成功几个字段
         output["parse_flags"] = {s.split("_")[0]: s.split("_")[1] for s in statuses}
@@ -270,13 +277,13 @@ class FinParseAI:
             try:
                 stock = find_stock(stock_code)
                 if stock and db_fields:
-                    from src.database import get_conn
+                    from src.database import get_conn, reports_table
                     conn = get_conn()
                     try:
                         with conn.cursor() as cur:
-                            # 按 股票代码+年份+年报 定位记录行
+                            # 按 股票代码+年份+年报 定位记录行（走 reports_table 开关，与写入同表）
                             cur.execute(
-                                "SELECT id FROM financial_reports WHERE stock_code=%s AND report_year=%s AND report_quarter='annual' LIMIT 1",
+                                f"SELECT id FROM `{reports_table()}` WHERE stock_code=%s AND report_year=%s AND report_quarter='annual' LIMIT 1",
                                 (stock_code, report_year),
                             )
                             row = cur.fetchone()

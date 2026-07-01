@@ -73,7 +73,10 @@ class BatchParseRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "FinParseAI", "version": "0.1.0"}
+    from src.database import reports_table
+    tbl = reports_table()
+    return {"status": "ok", "service": "FinParseAI", "version": "0.1.0",
+            "reports_table": tbl, "is_test": tbl != "financial_reports"}
 
 
 @app.get("/status")
@@ -536,6 +539,29 @@ def debug_judge_chats(code: str = None, field: str = None, limit: int = 200):
     """对话台：列出记录下来的历史对话。"""
     from src.eval.test_store import list_chats
     return {"chats": list_chats(code, field, limit)}
+
+
+# ── 复核 agent 对话台（绿灯专用：审锚的盲区，pass 才真过）──
+
+@app.get("/debug/verify/prepare")
+def debug_verify_prepare(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """复核对话台：拼好发给复核 agent 的 messages 但不发送,返给前端编辑。"""
+    from src.console_service import verify_prepare
+    return verify_prepare(stock_code, year, field)
+
+
+@app.post("/debug/verify/chat")
+def debug_verify_chat(req: JudgeChatRequest):
+    """复核对话：把(可编辑过的)messages 发给复核 agent,记录,返回 pass/hold。"""
+    from src.console_service import verify_chat
+    return verify_chat(req.code, req.year, req.field, req.messages)
+
+
+@app.get("/debug/verify/chats")
+def debug_verify_chats(code: str = None, field: str = None, limit: int = 200):
+    """复核对话台：列出该字段的复核历史(与 judge 分开,tag=field::verify)。"""
+    from src.eval.test_store import list_chats
+    return {"chats": list_chats(code, f"{field}::verify" if field else None, limit)}
 
 
 # ── 入库审核队列(LLM判ok→人审→入库) ──
