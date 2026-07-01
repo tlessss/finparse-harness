@@ -510,6 +510,13 @@ def debug_columns(stock_code: str, year: int = 2025, field: str = "revenue_break
     return columns_debug(stock_code, year, field)
 
 
+@app.get("/debug/recall")
+def debug_recall(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """向量召回测试台：语义相似度召回候选表(选表解耦第一段)。"""
+    from src.console_service import recall_debug
+    return recall_debug(stock_code, year, field)
+
+
 @app.get("/debug/judge/prepare")
 def debug_judge_prepare(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
     """对话台：拼好发给LLM的messages但不发送,返给前端编辑。"""

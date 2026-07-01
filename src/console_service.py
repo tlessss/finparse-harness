@@ -208,6 +208,20 @@ def _field_unit_label(code: str, year: int, field: str):
         return None
 
 
+def recall_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
+    """向量召回测试台：语义相似度把哪些表排前面(去数字只留文字→BGE→比意图参照)。"""
+    from src.parsers.infra.table_recall import vector_recall, _table_textdoc, _FIELD_QUERY
+    tables = get_tables(code, year)
+    if not tables:
+        return {"error": "无缓存（先解析一次该报告）"}
+    sig = _DBG_SIG.get(field, "revenue")
+    ranked = vector_recall(tables, sig, top_k=10, threshold=0.0)
+    cands = [{"page": t.get("page"), "score": t.get("recall_score"),
+              "doc": _table_textdoc(t.get("table"))[:90]} for t in ranked]
+    return {"code": code, "year": year, "field": field, "sig": sig,
+            "query": _FIELD_QUERY.get(sig), "total_tables": len(tables), "candidates": cands}
+
+
 def select_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
     """选表调试台：返回该字段所有相关候选表的 得分明细 + 淘汰原因 + 预览，供人工核对选表准不准。"""
     from src.parsers.infra.table_scanner import score_breakdown
