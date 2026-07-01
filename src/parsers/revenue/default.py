@@ -53,19 +53,43 @@ class RevenueParser(BaseParser):
 
     def _resolve_columns(self, table: list):
         """
-        M1：表头驱动认列（含占比闸门）。
-        - name/amount：表头优先，缺失回退统计法。
-        - ratio：只有表头命中"占营业收入比重"类别名才取；否则置空，绝不拿毛利率顶替。
+        营收表认列：**表头驱动为唯一主力**（读 revenue.yaml 的 header_aliases）。
+        - name/amount/ratio 均以"表头别名命中的列"为准。
+        - 表头没给全时，只用极简兜底（名称=第一个文字列，金额=第一个金额列），
+          不再跑历史包袱式的整套统计法 _detect_columns（它只留给调试台做"内容法"对照）。
+        - ratio 闸门保持：表头命中"占营业收入比重"类别名才取，绝不拿毛利率顶替。
         """
-        stat_name, stat_amount, stat_ratio = self._detect_columns(table)
         aliases = self._header_aliases()
-        if not aliases:
-            return stat_name, stat_amount, stat_ratio   # 无规则 → 旧逻辑
-        hdr = detect_columns_by_header(table, aliases)
-        name_col = hdr.get("name") if hdr.get("name") is not None else stat_name
-        amount_col = hdr.get("revenue") if hdr.get("revenue") is not None else stat_amount
-        ratio_col = hdr.get("ratio")    # 闸门：表头命中占比别名才取；否则置空
+        hdr = detect_columns_by_header(table, aliases) if aliases else {}
+        name_col = hdr.get("name")
+        amount_col = hdr.get("revenue")
+        ratio_col = hdr.get("ratio")        # 闸门：表头命中占比别名才取
+        if name_col is None:
+            name_col = self._first_text_col(table)
+        if amount_col is None:
+            amount_col = self._first_money_col(table, exclude={name_col, ratio_col})
         return name_col, amount_col, ratio_col
+
+    @staticmethod
+    def _first_text_col(table: list) -> int:
+        """名称列兜底：第一个"多为文字"的列。找不到退 0。"""
+        ncols = max((len(r) for r in table), default=0)
+        for c in range(ncols):
+            if sum(1 for row in table if c < len(row) and RevenueParser._is_text(row[c] or "")) >= 2:
+                return c
+        return 0
+
+    @staticmethod
+    def _first_money_col(table: list, exclude=None):
+        """金额列兜底：第一个"多为金额"的列（跳过名称/占比列，避免撞列）。找不到退 None。"""
+        skip = exclude if isinstance(exclude, (set, list, tuple)) else {exclude}
+        ncols = max((len(r) for r in table), default=0)
+        for c in range(ncols):
+            if c in skip:
+                continue
+            if sum(1 for row in table if c < len(row) and RevenueParser._looks_like_money(row[c] or "")) >= 2:
+                return c
+        return None
 
     def parse(self, pdf_path: str, pre_scan: list = None) -> Dict:
         # 优先用缓存(已跨页拼接完整)的表 + caption 选表 —— 避免自抽截断
@@ -98,6 +122,7 @@ class RevenueParser(BaseParser):
             return None
         top = cands[0]
         best = top["table"]
+
         item = next((x for x in pre_scan if x.get("table") is best), None)
         unit_text = (item.get("caption", "") + " " + item.get("text", "")) if item else ""
         unit_ratio = detect_unit(unit_text)
