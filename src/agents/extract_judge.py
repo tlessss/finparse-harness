@@ -11,6 +11,8 @@ import re
 from typing import Optional
 
 from src.agents.llm_client import chat
+from src.agents.llm_routing import resolve_model
+from src.prompts.registry import build_messages
 
 
 def _serialize(grid, max_rows=30) -> str:
@@ -41,17 +43,11 @@ def judge_extraction(spec, table: dict, year: int, log=print) -> Optional[dict]:
     text = _serialize(grid)
     if not text:
         return {"is_target": False, "clean": False, "issue": "空表", "confidence": "high"}
-    prompt = (
-        f"下面是从年报抽取的一张表格(可能挑错了表，或抽取错位)。判断两件事：\n"
-        f"① is_target：它是不是「{spec.label}」要的目标表？目标口径：{spec.spec_note}\n"
-        f"   （别被毛利率表/其它无关表冒充；确实是就 true）\n"
-        f"② clean：抽取是否干净可解析？（列对齐、没串列、没把多列挤进一格、没行错位 = true）\n"
-        f'输出 JSON：{{"is_target":true/false,"clean":true/false,"issue":"一句话问题(没问题留空)","confidence":"high/med/low"}}\n'
-        f"只输出 JSON，不要解释。\n\n表格（本期是{year}年）：\n{text}"
-    )
+    messages = build_messages("extract_judge", {
+        "label": spec.label, "spec_note": spec.spec_note, "year": year, "table_text": text,
+    })["messages"]
     try:
-        raw = chat([{"role": "system", "content": "你审核中文年报的表格抽取质量，严谨，只输出 JSON。"},
-                    {"role": "user", "content": prompt}], role="judge", temperature=0)
+        raw = chat(messages, role="judge", temperature=0, model=resolve_model("extract_judge"))
     except Exception as e:
         log(f"    抽表判定异常: {str(e)[:60]}")
         return None

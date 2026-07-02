@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { codeLabel, loadStockNames, FIELD_LABEL } from "./consoleData";
+import { codeLabel, loadStockNames, FIELD_LABEL, fmtTime } from "./consoleData";
 import { apiGet, apiPost } from "./api";
 
 type Rec = {
@@ -72,7 +72,7 @@ export default function TestData() {
                 <td className="px-3 py-2 text-xs">{r.confidence ? <span className={r.confidence === "high" ? "text-green-600" : r.confidence === "low" ? "text-orange-500" : "text-gray-400"}>{r.confidence}</span> : "—"}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">{summaryText(r)}</td>
                 <td className="px-3 py-2">{r.verdict ? <span className={`text-xs ${r.verdict === "ok" ? "text-green-600" : "text-red-500"}`}>{r.verdict === "ok" ? "✓ 对" : "✗ 错"}</span> : <span className="text-xs text-gray-300">未标</span>}</td>
-                <td className="px-3 py-2 text-xs text-gray-400">{r.created_at?.slice(5, 16)}</td>
+                <td className="px-3 py-2 text-xs text-gray-400">{fmtTime(r.created_at, true)}</td>
                 <td className="px-3 py-2 space-x-2 whitespace-nowrap">
                   <button onClick={() => mark(r.id, "ok")} className="text-green-600 hover:underline text-xs">标对</button>
                   <button onClick={() => mark(r.id, "wrong")} className="text-red-500 hover:underline text-xs">标错</button>

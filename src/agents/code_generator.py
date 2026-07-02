@@ -17,6 +17,7 @@ import re
 from typing import Dict, Callable
 
 from src.agents.llm_client import chat
+from src.agents.llm_routing import resolve_model
 from src.eval.table_cache import get_tables
 from src.eval.sandbox_exec import version_parse_fn
 from src.eval.run_eval import eval_version, accept_candidate
@@ -147,7 +148,7 @@ def generate_parser(code: str, year: int, golden_entry: Dict,
     ]
 
     for r in range(1, max_rounds + 1):
-        raw = chat(messages, role="codegen")
+        raw = chat(messages, role="codegen", model=resolve_model("codegen"))
         src = _extract_code(raw)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(src)

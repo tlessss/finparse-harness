@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, Fragment } from "react";
-import { codeLabel, FIELD_LABEL } from "./consoleData";
+import { codeLabel, FIELD_LABEL, fmtTime } from "./consoleData";
 import { apiGet } from "./api";
 
 type Commit = {
@@ -84,7 +84,7 @@ export default function CommittedList() {
                       <td className="px-3 py-1.5">{FIELD_LABEL[c.field] || c.field}</td>
                       <td className="px-3 py-1.5 text-xs text-gray-500">{summarize(c.result)}</td>
                       <td className="px-3 py-1.5"><span className={`px-2 py-0.5 rounded text-xs ${src.cls}`}>{src.label}</span></td>
-                      <td className="px-3 py-1.5 text-xs text-gray-400">{(c.reviewed_at || c.created_at)?.slice(0, 16)}</td>
+                      <td className="px-3 py-1.5 text-xs text-gray-400">{fmtTime(c.reviewed_at || c.created_at)}</td>
                       <td className="px-3 py-1.5 text-right">
                         <button onClick={() => setOpen(open === c.id ? null : c.id)} className="text-blue-600 hover:underline text-xs">
                           {open === c.id ? "收起" : "详情"}

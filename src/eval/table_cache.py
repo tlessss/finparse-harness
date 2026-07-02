@@ -22,8 +22,9 @@ _CACHE_DIR = "goldset/tables_cache"
 
 
 def _pdf_path(code: str, year: int):
-    hits = sorted(Config.PDF_CACHE_DIR.glob(f"{code}_{year}*.pdf"))
-    return str(hits[0]) if hits else None
+    # 缓存优先，未命中则按需下载（复用 book-agent 巨潮方案）
+    from src.parsers.infra.pdf_locator import ensure_pdf
+    return ensure_pdf(code, year)
 
 
 def put(code: str, year: int, tables) -> None:

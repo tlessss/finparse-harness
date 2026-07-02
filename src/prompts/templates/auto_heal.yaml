@@ -1,0 +1,16 @@
+id: auto_heal
+version: v1
+role: extract
+system: |-
+  你从中文年报表格精确抽取结构化数据，严谨、只输出JSON。
+user: |-
+  从下面这张年报表格里，抽取 **{{year}}年(本期，不是上期/去年)** 的「{{label}}」结构化数据。
+  {{unit_hint}}准则口径：{{spec_note}}
+  输出 JSON，形如：{{shape}}
+  要点：①只要本期({{year}}年)那一列，别拿上期/去年；②金额换算成元(见上方单位提示)；③占比是百分数(如60.8表示60.8%)；④跳过合计/小计行；⑤分项要全。
+  只输出 JSON，不要解释。
+
+  表格：
+  {{table_text}}
+output_schema:
+  note: 形如 shape 变量给出的字段结构（B类总额+明细 / 维度分项+占比）

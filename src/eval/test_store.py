@@ -31,6 +31,12 @@ def _conn():
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, reviewed_at TEXT,
         stock_code TEXT, year INTEGER, field TEXT, result TEXT, confidence TEXT,
         source TEXT, status TEXT, note TEXT)""")
+    # 流水线血缘(append-only)：一次跑一行，存整条链路 + 结局。latest-wins(取 MAX(id))。
+    c.execute("""CREATE TABLE IF NOT EXISTS pipeline_runs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT,
+        stock_code TEXT, year INTEGER, field TEXT,
+        outcome TEXT, via TEXT, reason TEXT, chain TEXT, verify TEXT)""")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_pr_key ON pipeline_runs(stock_code,year,field,id)")
     return c
 
 
@@ -125,9 +131,10 @@ def save_chat(code, year, field, messages, reply):
 
 
 def enqueue_commit(code, year, field, result, confidence=None, source="llm_ok"):
-    """LLM判ok → 进入库审核队列(pending)。同(code,年,字段)只留一条待审,旧的覆盖。返回 id。"""
+    """LLM判ok → 进入库审核队列(pending)。同(code,年,字段)**全状态幂等**:重新入库先删旧记录
+    (含已 approved/rejected)再插新的,台账每份财报只留最新一条(和真库 UPDATE 覆盖单行一致)。返回 id。"""
     c = _conn()
-    c.execute("DELETE FROM review_commits WHERE stock_code=? AND year=? AND field=? AND status='pending'",
+    c.execute("DELETE FROM review_commits WHERE stock_code=? AND year=? AND field=?",
               (code, int(year), field))
     cur = c.execute(
         "INSERT INTO review_commits(created_at,stock_code,year,field,result,confidence,source,status) "
@@ -202,3 +209,54 @@ def list_chats(code=None, field=None, limit=200):
         except Exception:
             r["messages"] = []
     return rows
+
+
+# ── 流水线血缘 pipeline_runs ──
+
+def save_run(code, year, field, outcome, via=None, reason=None, chain=None, verify=None):
+    """存一次流水线跑批(append-only)。chain/verify 存 JSON。返回行 id。"""
+    c = _conn()
+    c.execute(
+        """INSERT INTO pipeline_runs(created_at,stock_code,year,field,outcome,via,reason,chain,verify)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (time.strftime("%Y-%m-%d %H:%M:%S"), code, int(year), field, outcome, via, reason,
+         json.dumps(chain, ensure_ascii=False) if chain is not None else None,
+         json.dumps(verify, ensure_ascii=False) if verify is not None else None))
+    c.commit()
+    rid = c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    c.close()
+    return rid
+
+
+def _parse_run(r):
+    d = dict(r)
+    for k in ("chain", "verify"):
+        try:
+            d[k] = json.loads(d[k]) if d.get(k) else None
+        except Exception:
+            d[k] = None
+    return d
+
+
+def get_latest_run(code, year, field):
+    """该 (code,year,field) 最近一次跑批(取 MAX(id))。"""
+    c = _conn()
+    r = c.execute(
+        "SELECT * FROM pipeline_runs WHERE stock_code=? AND year=? AND field=? ORDER BY id DESC LIMIT 1",
+        (code, int(year), field)).fetchone()
+    c.close()
+    return _parse_run(r) if r else None
+
+
+def list_latest_runs(year, fields=None):
+    """每个 (code,field) 的最近一次跑批。fields 传入则只取这些字段。"""
+    c = _conn()
+    rows = c.execute(
+        """SELECT p.* FROM pipeline_runs p
+           JOIN (SELECT stock_code,field,MAX(id) mid FROM pipeline_runs WHERE year=? GROUP BY stock_code,field) m
+           ON p.id=m.mid ORDER BY p.stock_code""", (int(year),)).fetchall()
+    c.close()
+    out = [_parse_run(r) for r in rows]
+    if fields:
+        out = [d for d in out if d["field"] in fields]
+    return out

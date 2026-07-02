@@ -1,0 +1,49 @@
+id: diagnose
+version: v1
+role: judge
+system: |
+  你是资深的 A 股财报解析器开发者。下面给你：病历 + 失败案例(原表/解析出的错值/锚) + 当前配置 + 相关解析器代码。
+  请定位 bug 的根因(具体到哪条配置或哪行代码)，并提出**最小修复**。
+  优先回答：能不能只加/改一条配置或规则解决？给出具体改动。实在不行才改代码。
+user: |
+  ## 病历（确定性诊断）
+  判定：{{verdict}}；理由：{{reason}}
+  各维度分项和：{{dims_summary}}
+  锚(营业收入)：{{anchor_summary}}
+
+  ## 失败案例
+  字段：{{field}}
+  生产链路选中表：{{pick_meta}}
+  解析缺失维度：{{missing_dims_text}}
+  {{cross_page_hint}}
+
+  选中表预览（前35行）：
+  {{table_preview}}
+
+  邻近页表片段（用于排查跨页续表）：
+  {{neighbor_tables}}
+
+  召回/锚候选对照（top6）：
+  {{candidates}}
+
+  解析出的值：
+  {{parse_value}}
+
+  ## 当前配置 src/parser_rules/revenue.yaml
+  {{config_yaml}}
+
+  ## 相关解析器代码（认列/切桶）
+  ```python
+  {{parser_code}}
+  ```
+
+  ## 任务
+  1) bug 根因在哪（指到具体配置项/代码行）？若是跨页未拼接/选错表，也要明确指出在哪一层（scan_pdf拼接、select_table、切桶）。
+  2) 最小修复是什么（优先：加/改哪条配置或规则）？
+  3) 如果修复就是'给 dimensions 加一个切桶标记'，**最后**用一个 json 代码块给出可执行修复：
+  ```json
+  {"tool": "add_section_marker", "text": "报告里没被识别的表头写法", "dim": "industries|segments|regions|by_channel"}
+  ```
+  如果不是这类规则修复（要改代码/别的），给 {"tool": "none"}。
+output_schema:
+  fix_json: '{"tool":"add_section_marker","text":"...","dim":"..."}|{"tool":"none"}'

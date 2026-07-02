@@ -1,0 +1,20 @@
+id: extract_judge
+version: v1
+role: judge
+system: |-
+  你审核中文年报的表格抽取质量，严谨，只输出 JSON。
+user: |-
+  下面是从年报抽取的一张表格(可能挑错了表，或抽取错位)。判断两件事：
+  ① is_target：它是不是「{{label}}」要的目标表？目标口径：{{spec_note}}
+     （别被毛利率表/其它无关表冒充；确实是就 true）
+  ② clean：抽取是否干净可解析？（列对齐、没串列、没把多列挤进一格、没行错位 = true）
+  输出 JSON：{"is_target":true/false,"clean":true/false,"issue":"一句话问题(没问题留空)","confidence":"high/med/low"}
+  只输出 JSON，不要解释。
+
+  表格（本期是{{year}}年）：
+  {{table_text}}
+output_schema:
+  is_target: true/false
+  clean: true/false
+  issue: 一句话问题(没问题留空)
+  confidence: high/med/low

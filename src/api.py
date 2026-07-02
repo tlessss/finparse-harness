@@ -541,6 +541,20 @@ def debug_judge_chats(code: str = None, field: str = None, limit: int = 200):
     return {"chats": list_chats(code, field, limit)}
 
 
+@app.get("/debug/rule_code/prepare")
+def debug_rule_code_prepare(stock_code: str, year: int = 2025, field: str = "revenue_breakdown",
+                            decision: str = "", root_cause: str = "", next_action: str = "", summary: str = ""):
+    """第二阶段：规则/代码诊断调试包。可接收第一阶段结论作为上下文。"""
+    from src.console_service import rule_code_prepare
+    stage1 = {
+        "decision": decision,
+        "root_cause": root_cause,
+        "next_action": next_action,
+        "summary": summary,
+    }
+    return rule_code_prepare(stock_code, year, field, stage1=stage1)
+
+
 # ── 复核 agent 对话台（绿灯专用：审锚的盲区，pass 才真过）──
 
 @app.get("/debug/verify/prepare")
@@ -719,33 +733,33 @@ def triage_review(req: TriageReviewRequest):
 def review_judge(req: JudgeRequest):
     """对某(报告,字段)跑 #2 溯源 LLM 裁判（按需触发，较慢 ~10-20s）。"""
     from src.eval.field_spec import FIELDS, get_spec
-    from src.parsers.revenue_router import route_field
     from src.agents.llm_judge import judge_field
+    from src.eval.canonical import get_field          # ★ 单一真源:判的值 = 审核台显示的值
     if req.field not in FIELDS:
         return {"verdict": "unknown", "summary": f"未知字段 {req.field}", "field": req.field}
     _ensure_cached(req.stock_code, req.year)
     spec = get_spec(req.field)
-    rt = route_field(spec, req.stock_code, req.year)
-    value = rt.get("result")
-    if isinstance(value, dict) and req.field in value:        # D类富结构解包
-        value = value[req.field]
+    rec = get_field(req.stock_code, req.year, req.field)
+    value = rec.get("value") if rec else None
     if value is None:
-        return {"verdict": "unknown", "summary": "该字段未路由出结果，无法裁判", "field": req.field}
-    return judge_field(req.field, req.stock_code, req.year, value, spec=spec)
+        return {"verdict": "unknown", "summary": "该字段无解析结果，无法裁判", "field": req.field}
+    return judge_field(req.field, req.stock_code, req.year, value,
+                       provenance=rec.get("provenance"), spec=spec)
 
 
 @app.get("/review/signals")
 def review_signals(stock_code: str, year: int = 2025):
     """每字段的置信度信号(#1跨表锚) + DB锚值，供审核台展示徽章。"""
-    from src.eval.field_spec import FIELDS, get_spec
-    from src.parsers.revenue_router import route_field
+    from src.eval.field_spec import FIELDS
     from src.eval.anchors import get_anchors
+    from src.eval.canonical import get_canonical      # ★ 单一真源:徽章基于审核台显示的那份值
     _ensure_cached(stock_code, year)
+    canon = get_canonical(stock_code, year) or {}
     out = {}
     for field in FIELDS:
-        rt = route_field(get_spec(field), stock_code, year)
-        sig = rt.get("signal") or {}
-        out[field] = {"status": rt.get("status"), "clean": sig.get("clean"),
+        rec = canon.get(field) or {}
+        sig = rec.get("signal") or {}
+        out[field] = {"status": rec.get("status"), "clean": sig.get("clean"),
                       "confidence": sig.get("confidence"), "anchored": sig.get("anchored"),
                       "anchor": sig.get("anchor")}
     return {"signals": out, "anchors": get_anchors(stock_code, year)}
@@ -816,6 +830,34 @@ def stocks_names(codes: str = None):
         conn.close()
 
 
+@app.get("/stocks/cached")
+def stocks_cached():
+    """只返回**有缓存 PDF**的 code→公司名（选公司只列能实际测的报告）。
+    扫 PDF_CACHE_DIR 里的 {code}_{year}_*.pdf 取 code，去 stocks 表补名字。"""
+    import glob
+    import os
+    from src.config import Config
+    from src.database import get_conn
+    codes = set()
+    for p in glob.glob(str(Config.PDF_CACHE_DIR / "*.pdf")):
+        code = os.path.basename(p).split("_", 1)[0]
+        if code.isdigit():
+            codes.add(code)
+    if not codes:
+        return {"names": {}, "count": 0}
+    cl = sorted(codes)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT code,name FROM stocks WHERE code IN ({','.join(['%s'] * len(cl))})", cl)
+            names = {r["code"]: r["name"] for r in cur.fetchall()}
+    finally:
+        conn.close()
+    for c in cl:                       # 有缓存但 stocks 表缺名字的,也列出(名字回退=code)
+        names.setdefault(c, c)
+    return {"names": names, "count": len(cl)}
+
+
 @app.get("/batch/candidates")
 def batch_candidates(q: str = "", offset: int = 0, limit: int = 24, year: int = 2025):
     """可解析任务列表（有缓存 PDF 的报告）。支持 q(按 code/公司名搜) + 分页(offset/limit)。"""
@@ -846,7 +888,118 @@ def batch_candidates(q: str = "", offset: int = 0, limit: int = 24, year: int = 
             "total": len(filtered), "offset": offset, "limit": limit}
 
 
+# ── Agent 管理页 ──
+# 注意路由顺序：静态段 /agents/routing 必须在参数段 /agents/{agent_id} 之前声明，否则会被后者吞掉。
+
+
+@app.get("/agents")
+def agents_list_api():
+    from src.console_agents import agents_list
+    return agents_list()
+
+
+@app.get("/agents/routing")
+def agents_routing_get_api():
+    from src.console_agents import routing_get
+    return routing_get()
+
+
+class RoutingRequest(BaseModel):
+    agent_id: str
+    model: str = ""
+
+
+@app.post("/agents/routing")
+def agents_routing_set_api(req: RoutingRequest):
+    from src.console_agents import routing_set
+    return routing_set(req.agent_id, req.model)
+
+
+@app.get("/agents/{agent_id}")
+def agent_detail_api(agent_id: str):
+    from src.console_agents import agent_detail
+    return agent_detail(agent_id)
+
+
+class AgentSaveRequest(BaseModel):
+    system: str
+    user: str
+    version: str = ""
+
+
+@app.post("/agents/{agent_id}")
+def agent_save_api(agent_id: str, req: AgentSaveRequest):
+    from src.console_agents import agent_save
+    return agent_save(agent_id, req.system, req.user, req.version or None)
+
+
+# ── 流水线成功率 / 链路 ──
+
+
+@app.get("/pipeline/result")
+def pipeline_result_api():
+    """成功率结果 —— 从 DB(pipeline_runs) 每份最近一次汇总（DB 空回退 JSON）。"""
+    from src.pipeline import result_from_db
+    return result_from_db()
+
+
+@app.get("/pipeline/progress")
+def pipeline_progress_api():
+    """实时批跑进度：phase / i / total / current(正在跑哪家) / done(已完成结局)。"""
+    from src.pipeline import load_progress
+    return load_progress() or {"phase": "idle"}
+
+
+@app.get("/pipeline/chain")
+def pipeline_chain_api(stock_code: str, year: int = 2025, field: str = "revenue_breakdown",
+                      fresh: bool = False):
+    """单字段整条链路 + 失败原因。默认读 DB 存好的(秒回)；fresh=1 实时重跑并写 DB。"""
+    from src.pipeline import chain_from_db
+    return chain_from_db(stock_code, year, field, recompute=fresh)
+
+
+@app.get("/pipeline/llm")
+def pipeline_llm_api(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """按需跑 LLM：绿灯→复核 agent(选错表/跨页体检)，非绿灯→judge_diagnose 第一阶段。约 15~20s。结果写 DB。"""
+    from src.pipeline import run_field, save_verify_run
+    rec = run_field(stock_code, year, field, use_llm=True)
+    try:
+        save_verify_run(stock_code, year, field, rec)
+    except Exception:
+        pass
+    return rec
+
+
+class PipelineRunRequest(BaseModel):
+    codes: list
+    year: int = 2025
+    fields: list = None
+
+
+@app.post("/pipeline/run")
+def pipeline_run_api(req: PipelineRunRequest):
+    """对已缓存的报告即时跑确定性成功率并保存（不发 LLM、不扫表）。"""
+    from src.pipeline import analyze_batch, save_result
+    res = analyze_batch(req.codes, req.year, req.fields, use_llm=False, log=lambda *_: None)
+    res["codes"] = req.codes
+    save_result(res)
+    return res
+
+
 # ── 启动入口 ──
+
+
+@app.get("/download/list")
+def download_list_api(board: str = "star", year: int = 2025):
+    from src.console_service import download_list
+    return download_list(board, year)
+
+
+@app.post("/download/batch")
+def download_batch_api(req: dict):
+    from src.console_service import download_batch
+    return download_batch(req.get("codes") or [], req.get("year", 2025))
+
 
 if __name__ == "__main__":
     import uvicorn

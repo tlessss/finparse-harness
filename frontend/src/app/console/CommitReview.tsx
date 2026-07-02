@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { codeLabel, FIELD_LABEL } from "./consoleData";
+import { codeLabel, FIELD_LABEL, fmtTime } from "./consoleData";
 import { apiGet, apiPost } from "./api";
 
 type Commit = {
@@ -66,8 +66,8 @@ export default function CommitReview() {
             <span className="font-medium">{codeLabel(c.stock_code)}</span>
             <span>{FIELD_LABEL[c.field] || c.field}</span>
             <span className="text-xs text-gray-500">{summarize(c.field, c.result)}</span>
-            <span className="text-xs text-gray-400">置信 {c.confidence} · 来源 {c.source} · {c.created_at?.slice(5, 16)}</span>
-            {c.status !== "pending" && <span className={`text-xs ${c.status === "approved" ? "text-green-600" : "text-red-500"}`}>{c.status === "approved" ? "✅ 已入库" : "✗ 已驳回"} {c.reviewed_at?.slice(5, 16)}</span>}
+            <span className="text-xs text-gray-400">置信 {c.confidence} · 来源 {c.source} · {fmtTime(c.created_at, true)}</span>
+            {c.status !== "pending" && <span className={`text-xs ${c.status === "approved" ? "text-green-600" : "text-red-500"}`}>{c.status === "approved" ? "✅ 已入库" : "✗ 已驳回"} {fmtTime(c.reviewed_at, true)}</span>}
             {c.status === "pending" && (
               <span className="ml-auto flex gap-2">
                 <button onClick={() => act(c.id, "approve")} disabled={busy === c.id}

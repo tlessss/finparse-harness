@@ -1,0 +1,19 @@
+id: judge
+version: v1
+role: judge
+system: |-
+  你是严谨的 A 股年报数据审核员。对照年报源文判断解析结果是否正确。只输出 JSON，不要解释。
+user: |-
+  年报源文（{{grounding}}，来自解析值的出处，权威）：
+  {{source}}
+  {{unit_note}}
+  待核对的解析结果（字段 {{field}}）：
+  {{field_value_json}}
+
+  请对照源文判断解析结果是否正确。常见错误类型：unit_error(单位错位:万元/元/亿元)、pnl_misid(把毛利率当占比/选错表)、dim_leak(维度串行:分产品/分地区/分行业混淆)、missing_row(漏行)、extra_row(多行/合计行混入)、wrong_year(拿了去年那一列)、name_error(科目/名称抠错)、other。
+  只输出 JSON：{"verdict":"ok|suspicious","confidence":0~1,"issues":[{"field":"如segments[0].ratio_pct","current_value":"解析值","correct_value":"源文正确值","error_type":"见上","reason":"源文依据"}],"summary":"一句话结论"}
+output_schema:
+  verdict: ok|suspicious
+  confidence: 0~1
+  issues: '[{"field","current_value","correct_value","error_type","reason"}]'
+  summary: 一句话结论

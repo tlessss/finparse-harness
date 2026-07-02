@@ -6,18 +6,29 @@ export const API_BASE = "http://localhost:8200";
 export const fmtMoney = (n: number | null | undefined) =>
   n == null || isNaN(Number(n)) ? "—" : Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
 
-// code → 公司名。从后端 /stocks/names 拉全量填充（DB stocks 表）；拉到前显示 code。
+// code → 公司名。从后端 /stocks/cached 拉（只含"有缓存PDF"的股票）→ 选公司只列能实际测的；拉到前显示 code。
 export const STOCK_NAMES: Record<string, string> = {};
 let _namesLoaded = false;
 export async function loadStockNames(): Promise<void> {
   if (_namesLoaded) return;
   try {
-    const r = await fetch(`${API_BASE}/stocks/names`);
+    const r = await fetch(`${API_BASE}/stocks/cached`);   // 只装有缓存PDF的股票→选公司只列能测的
     if (r.ok) { const d = await r.json(); Object.assign(STOCK_NAMES, d.names || {}); _namesLoaded = true; }
   } catch { /* 后端没起 → 保持空，显示 code */ }
 }
 export const codeLabel = (code: string) =>
   STOCK_NAMES[code] ? `${STOCK_NAMES[code]}(${code})` : code;
+
+// 后端时间戳存的是 UTC 字符串(服务器时区=UTC)；按浏览器本地时区、**24 小时制**显示。
+// short=true → "MM-DD HH:mm"；否则 "YYYY-MM-DD HH:mm"。
+export function fmtTime(s?: string, short = false): string {
+  if (!s) return "";
+  const d = new Date(s.replace(" ", "T") + "Z");
+  if (isNaN(d.getTime())) return s.slice(0, 16);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const md = `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return short ? md : `${d.getFullYear()}-${md}`;
+}
 
 export const FIELDS = [
   "revenue_breakdown", "cost_breakdown", "rnd_info",

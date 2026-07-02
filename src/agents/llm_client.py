@@ -15,12 +15,14 @@ from src.config import Config
 
 
 def chat(messages: List[Dict], role: str = "codegen",
-         temperature: float = 0.2, max_tokens: int = 4000) -> str:
-    """一次对话补全，返回文本。role 预留给将来按角色路由不同模型。"""
+         temperature: float = 0.2, max_tokens: int = 4000,
+         model: str = None) -> str:
+    """一次对话补全，返回文本。model 由调用方按 agent 传入（resolve_model(agent_id)）；
+    缺省回退 Config.LLM_MODEL。role 保留作日志/兼容，不再决定模型。"""
     from openai import OpenAI       # 延迟导入，未装也不影响纯规则路径
     client = OpenAI(api_key=Config.LLM_API_KEY, base_url=Config.LLM_BASE_URL)
     resp = client.chat.completions.create(
-        model=Config.LLM_MODEL,     # TODO 按 role 选模型：codegen→强模型(Opus4.8)
+        model=model or Config.LLM_MODEL,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,

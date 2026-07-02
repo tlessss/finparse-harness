@@ -11,6 +11,8 @@ const NAV = [
   { href: "/console/control", label: "批量控制" },
   { href: "/console/testing", label: "测试" },
   { href: "/console/workflow", label: "工作流" },
+  { href: "/console/pipeline", label: "流水线成功率" },
+  { href: "/console/agents", label: "Agent 管理" },
 ] as const;
 
 export default function ConsoleShell({ children }: { children: React.ReactNode }) {

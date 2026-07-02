@@ -11,6 +11,8 @@ import re
 from typing import Dict, Optional
 
 from src.agents.llm_client import chat
+from src.agents.llm_routing import resolve_model
+from src.prompts.registry import build_messages
 from src.eval.table_cache import get_tables
 from src.parsers.infra.table_scanner import filter_by_signature
 from src.parsers.revenue_router import field_plausibility, route_field
@@ -98,18 +100,12 @@ def llm_extract_golden(spec, code: str, year: int, log=print) -> Optional[Dict]:
         unit_hint = (f"⚠本表金额单位是【{_UNIT_NAME.get(ratio, str(ratio) + '元')}】，"
                      f"每个金额必须×{ratio}换算成【元】再输出(例:表里写1,234→输出{1234 * ratio})。\n"
                      if ratio > 1 else "")
-        prompt = (
-            f"从下面这张年报表格里，抽取 **{year}年(本期，不是上期/去年)** 的「{spec.label}」结构化数据。\n"
-            f"{unit_hint}"
-            f"准则口径：{spec.spec_note}\n"
-            f"输出 JSON，形如：{_shape(spec)}\n"
-            f"要点：①只要本期({year}年)那一列，别拿上期/去年；②金额换算成元(见上方单位提示)；"
-            f"③占比是百分数(如60.8表示60.8%)；④跳过合计/小计行；⑤分项要全。\n"
-            f"只输出 JSON，不要解释。\n\n表格：\n{table_text}"
-        )
+        messages = build_messages("auto_heal", {
+            "year": year, "unit_hint": unit_hint, "label": spec.label, "spec_note": spec.spec_note,
+            "shape": _shape(spec), "table_text": table_text,
+        })["messages"]
         try:
-            raw = chat([{"role": "system", "content": "你从中文年报表格精确抽取结构化数据，严谨、只输出JSON。"},
-                        {"role": "user", "content": prompt}], role="extract", temperature=0)
+            raw = chat(messages, role="extract", temperature=0, model=resolve_model("auto_heal"))
         except Exception as e:
             log(f"    LLM抽取异常: {str(e)[:80]}")
             continue

@@ -109,8 +109,9 @@ def recode(code: str, year: int, new_code: str) -> Dict:
 # ── 审核任务（结果 + 溯源 + 渲染页 + 解析器源码）──
 
 def _pdf_path(code: str, year: int):
-    hits = sorted(glob.glob(str(Config.PDF_CACHE_DIR / f"{code}_{year}*.pdf")))
-    return hits[0] if hits else None
+    # 缓存优先，未命中则按需下载（复用 book-agent 巨潮方案）
+    from src.parsers.infra.pdf_locator import ensure_pdf
+    return ensure_pdf(code, year)
 
 
 def _cached_engine_parse(code: str, year: int) -> Optional[Dict]:
@@ -184,6 +185,8 @@ def review_task(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
 _DBG_SIG = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd",
             "employees": "employee", "top_clients": "client", "top_suppliers": "supplier"}
 _DBG_ANCHOR = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd_expense"}
+# judge_diagnose 的这些根因属"选表/抽表"层面，暂无自愈能力 → 一律交人工(进分诊队列 needs_human)。
+_NO_AUTOHEAL_ROOT = {"incomplete_table", "wrong_table"}
 
 
 def _field_unit_label(code: str, year: int, field: str):
@@ -474,56 +477,9 @@ def heal_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
 
 
 def heal_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
-    """自愈对话台：拼一个"调试包"给 AI —— 病历 + 失败案例(原表/错值/锚) + 当前配置 + 相关解析器代码,
-    让它定位根因、提最小修复(优先改配置/规则)。返回可编辑 messages。不发送。"""
-    import inspect
-    from src.engine_orchestrator import FinParseAI
-    from src.parsers.infra.table_scanner import filter_by_signature
-    diag = heal_debug(code, year, field)
-    if diag.get("error"):
-        return diag
-    tables = get_tables(code, year) or []
-    sel = filter_by_signature(tables, _DBG_SIG.get(field, "revenue"))
-    table = (sel[0].get("table") if sel else []) or []
-    table_text = "\n".join(" | ".join((c or "") for c in row) for row in table[:30])
-    pdf = _pdf_path(code, year)
-    parser = FinParseAI()._get_parser(field, pdf)
-    try:
-        value = parser.parse(pdf, pre_scan=tables, code=code, year=year).get(field)
-    except Exception:
-        value = None
-    try:
-        config = open("src/parser_rules/revenue.yaml", encoding="utf-8").read()
-    except Exception:
-        config = "(读不到 revenue.yaml)"
-    code_src = ""
-    for m in ("_detect_columns", "_resolve_columns", "_classify"):
-        fn = getattr(parser, m, None)
-        if fn:
-            try:
-                code_src += inspect.getsource(fn) + "\n"
-            except Exception:
-                pass
-    dims_txt = "  ".join(f"{d['dim']}={d['sum']/1e8:.0f}亿({'过锚' if d['match'] else '✗'})" for d in diag.get("dims", []))
-    anchor = diag.get("anchor")
-    sys_msg = ("你是资深的 A 股财报解析器开发者。下面给你：病历 + 失败案例(原表/解析出的错值/锚) + 当前配置 + 相关解析器代码。"
-               "请定位 bug 的根因(具体到哪条配置或哪行代码)，并提出**最小修复**。"
-               "优先回答：能不能只加/改一条配置或规则解决？给出具体改动。实在不行才改代码。")
-    user = (
-        f"## 病历（确定性诊断）\n判定：{diag.get('verdict')}；理由：{diag.get('reason')}\n"
-        f"各维度分项和：{dims_txt}\n锚(营业收入)：{anchor/1e8:.2f}亿\n\n"
-        f"## 失败案例\n字段：{field}\n选中的原表（前30行）：\n{table_text}\n\n"
-        f"解析出的值：\n{json.dumps(value, ensure_ascii=False, indent=2)[:2500]}\n\n"
-        f"## 当前配置 src/parser_rules/revenue.yaml\n{config}\n\n"
-        f"## 相关解析器代码（认列/切桶）\n```python\n{code_src[:4000]}\n```\n\n"
-        f"## 任务\n1) bug 根因在哪（指到具体配置项/代码行）？\n"
-        f"2) 最小修复是什么（优先：加/改哪条配置或规则）？\n"
-        f"3) 如果修复就是'给 dimensions 加一个切桶标记'，**最后**用一个 json 代码块给出可执行修复：\n"
-        f'```json\n{{"tool": "add_section_marker", "text": "报告里没被识别的表头写法", "dim": "industries|segments|regions|by_channel"}}\n```\n'
-        f'如果不是这类规则修复（要改代码/别的），给 {{"tool": "none"}}。'
-    )
-    return {"code": code, "year": year, "field": field, "diag": diag,
-            "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": user}]}
+    """自愈对话台：拼诊断调试包（Prompt Registry → diagnose agent）。返回可编辑 messages，不发送。"""
+    from src.agents.diagnose_agent import prepare_diagnose
+    return prepare_diagnose(code, year, field)
 
 
 def _extract_fix(reply: str):
@@ -544,8 +500,9 @@ def _extract_fix(reply: str):
 def heal_chat(code: str, year: int, field: str, messages: list) -> Dict:
     """自愈对话：把(可编辑过的) messages 发给 AI,记录,返回修复建议 + 解析出的结构化修复 fix。"""
     from src.agents.llm_client import chat
+    from src.agents.llm_routing import resolve_model
     try:
-        reply = chat(messages, role="judge", temperature=0.3)
+        reply = chat(messages, role="judge", temperature=0.3, model=resolve_model("diagnose"))
     except Exception as e:
         return {"error": "LLM 调用异常: " + str(e)[:120]}
     try:
@@ -678,44 +635,56 @@ def columns_debug(code: str, year: int, field: str = "revenue_breakdown") -> Dic
 
 
 def judge_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
-    """对话台：解析该字段 → 拼好发给 LLM 的 messages(system+user) 但**不发送**,返给前端编辑。"""
-    from src.engine_orchestrator import FinParseAI
-    from src.agents.llm_judge import build_judge_messages
-    pdf = _pdf_path(code, year)
-    if not pdf:
-        return {"error": "无 PDF"}
-    if get_tables(code, year) is None:
-        return {"error": "无缓存（先解析一次该报告）"}
-    parser = FinParseAI()._get_parser(field, pdf)
-    try:
-        out = parser.parse(pdf, pre_scan=get_tables(code, year), code=code, year=year)
-    except Exception as e:
-        return {"error": "解析异常: " + str(e)[:100]}
-    value = out.get(field)
-    prov = out.get("溯源") or {}
-    if isinstance(prov.get(field), dict):
-        prov = prov[field]
-    unit_label = _field_unit_label(code, year, field)
-    messages, grounding = build_judge_messages(field, code, year, value, provenance=prov, unit_label=unit_label)
-    if messages is None:
-        return {"error": "无源文(溯源+RAG都没有),无法对话", "grounding": grounding}
-    return {"code": code, "year": year, "field": field, "grounding": grounding,
-            "unit": unit_label, "messages": messages, "result": value}
+    """对话台：judge_diagnose 分层诊断调试包（Prompt Registry）。"""
+    from src.agents.judge_diagnose_agent import prepare_judge_diagnose
+
+    return prepare_judge_diagnose(code, year, field)
+
+
+def rule_code_prepare(code: str, year: int, field: str = "revenue_breakdown", stage1: Dict = None) -> Dict:
+    """对话台：rule_code_diagnose 第二阶段调试包（规则/代码层）。"""
+    from src.agents.rule_code_diagnose_agent import prepare_rule_code_diagnose
+
+    return prepare_rule_code_diagnose(code, year, field, stage1=stage1 or {})
 
 
 def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:
     """把(可能被人编辑过的) messages 发给 LLM,记录整段对话,返回回复 + 解析出的判定。"""
     from src.agents.llm_client import chat
     from src.agents.llm_judge import _extract_json
+    from src.agents.llm_routing import resolve_model
     try:
-        reply = chat(messages, role="judge", temperature=0.3)
+        reply = chat(messages, role="judge", temperature=0.3, model=resolve_model("judge"))
     except Exception as e:
         return {"error": "LLM 调用异常: " + str(e)[:120]}
-    # 解析回复 → 判"是否完全正确"：verdict=ok 且无任何 issue
+    # 解析回复：优先读新契约 decision/root_cause；旧契约 verdict/issues 继续兼容
     v = _extract_json(reply) or {}
+    decision = v.get("decision")
+    root_cause = v.get("root_cause")
+    next_action = v.get("next_action")
+    evidence = v.get("evidence") or []
+    if isinstance(evidence, str):                 # LLM 常把 evidence 写成一句话而非数组 → 统一成 list
+        evidence = [evidence]
+    elif not isinstance(evidence, list):
+        evidence = [str(evidence)]
+    summary = v.get("summary")
     verdict, conf = v.get("verdict"), v.get("confidence")
     issues = v.get("issues") or []
-    all_ok = (verdict == "ok" and len(issues) == 0) if verdict in ("ok", "suspicious") else None
+    if decision:
+        all_ok = True if decision == "ok" else False
+    else:
+        all_ok = (verdict == "ok" and len(issues) == 0) if verdict in ("ok", "suspicious") else None
+    # 选表/跨页类根因目前无自愈能力 → 确定性地改判交人工（不依赖 LLM 说什么 next_action），并进分诊队列。
+    handed_to_human = False
+    if root_cause in _NO_AUTOHEAL_ROOT:
+        next_action = "handoff_human"
+        try:
+            from src.eval.triage_queue import enqueue
+            note = summary or (evidence[0] if evidence else "") or root_cause or ""
+            enqueue(code, year, field, "needs_human", note=f"{root_cause}: {note}"[:200])
+            handed_to_human = True
+        except Exception:
+            pass
     try:
         from src.eval.test_store import save_chat
         save_chat(code, year, field, messages, reply)
@@ -732,8 +701,21 @@ def judge_chat(code: str, year: int, field: str, messages: list) -> Dict:
             commit_id = enqueue_commit(code, year, field, result, conf)
         except Exception:
             pass
-    return {"reply": reply, "verdict": verdict, "confidence": conf,
-            "issues": issues, "all_ok": all_ok, "commit_id": commit_id}
+    return {
+        "reply": reply,
+        "decision": decision,
+        "root_cause": root_cause,
+        "next_action": next_action,
+        "summary": summary,
+        "evidence": evidence,
+        "handed_to_human": handed_to_human,
+        # legacy fields
+        "verdict": verdict,
+        "confidence": conf,
+        "issues": issues,
+        "all_ok": all_ok,
+        "commit_id": commit_id,
+    }
 
 
 def verify_prepare(code: str, year: int, field: str = "revenue_breakdown") -> Dict:
@@ -777,8 +759,9 @@ def verify_chat(code: str, year: int, field: str, messages: list) -> Dict:
     """把(可编辑过的)复核 messages 发给复核 agent，记录，返回回复 + 解析出的 pass/hold 裁决。"""
     from src.agents.llm_client import chat
     from src.agents.llm_judge import _extract_json
+    from src.agents.llm_routing import resolve_model
     try:
-        reply = chat(messages, role="judge", temperature=0.1)
+        reply = chat(messages, role="judge", temperature=0.1, model=resolve_model("verify"))
     except Exception as e:
         return {"error": "LLM 调用异常: " + str(e)[:120]}
     v = _extract_json(reply) or {}
@@ -790,6 +773,16 @@ def verify_chat(code: str, year: int, field: str, messages: list) -> Dict:
         save_chat(code, year, f"{field}::verify", messages, reply)   # 与 judge 历史分开
     except Exception:
         pass
+    # 复核 hold = 体检不过(选错表/跨页)或有项对不上 → 交人工，不入库
+    handed_to_human = False
+    if verdict == "hold":
+        try:
+            from src.eval.triage_queue import enqueue
+            issues = ", ".join(f"{s.get('issue')}" for s in suspects if s.get("issue"))[:120]
+            enqueue(code, year, field, "needs_human", note=f"verify hold: {issues or v.get('summary','')}"[:200])
+            handed_to_human = True
+        except Exception:
+            pass
     # 复核 pass = LLM 逐项对照源文点头 = 终审通过 → 自动入库(测试库,留痕 source=verify_agent)
     committed = None
     if verdict == "pass" and field in _COMMIT_COLUMNS:
@@ -803,7 +796,8 @@ def verify_chat(code: str, year: int, field: str, messages: list) -> Dict:
         except Exception as e:
             committed = f"error:{str(e)[:60]}"
     return {"reply": reply, "verdict": verdict, "suspects": suspects,
-            "passed": passed, "summary": v.get("summary"), "committed": committed}
+            "passed": passed, "summary": v.get("summary"), "committed": committed,
+            "handed_to_human": handed_to_human}
 
 
 _COMMIT_COLUMNS = {"revenue_breakdown", "cost_breakdown", "top_clients",
@@ -904,4 +898,53 @@ def certify_parser(code: str, year: int, code_src: str, key: str = None) -> Dict
     key = key or f"{code}-{year}-人工认证"
     fp = fingerprint_of(code, year)             # 记录版式指纹 → 缩候选索引
     certify(key, path, fingerprints=[fp] if fp else None)
+    # 认证后旧值作废：引擎缓存 + 单一真源都要重算，否则审核台/裁判仍显示旧解析结果
+    _pc = os.path.join("goldset", "parse_cache", f"{code}_{year}.json")
+    if os.path.exists(_pc):
+        os.remove(_pc)
+    from src.eval.canonical import invalidate as _inv_canonical
+    _inv_canonical(code, year)
     return {"certified": True, "parser_key": key, "path": path, "score": 1.0, "fingerprint": fp}
+
+
+# ── 批量预下载 PDF（下载表：把"下载"从"测试"里剥离，先下好再纯解析测）──
+
+def _has_cache(code: str, year: int) -> bool:
+    return bool(glob.glob(str(Config.PDF_CACHE_DIR / f"{code}_{year}*.pdf")))
+
+
+def download_list(board: str = "star", year: int = 2025) -> dict:
+    """某范围内"有 pdf_source_url(可下载)"的 code + 已缓存标注。board=star(科创板688/689)/all。"""
+    from src.database import get_conn
+    like = {"star": ("688%", "689%")}.get(board)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            base = ("SELECT DISTINCT stock_code FROM financial_reports "
+                    "WHERE report_quarter='annual' AND report_year=%s "
+                    "AND pdf_source_url IS NOT NULL AND pdf_source_url<>''")
+            if like:
+                cur.execute(base + " AND (stock_code LIKE %s OR stock_code LIKE %s)", (year, like[0], like[1]))
+            else:
+                cur.execute(base, (year,))
+            codes = sorted(r["stock_code"] for r in cur.fetchall())
+    finally:
+        conn.close()
+    cached = [c for c in codes if _has_cache(c, year)]
+    return {"board": board, "year": year, "codes": codes, "total": len(codes),
+            "cached_count": len(cached), "pending": len(codes) - len(cached)}
+
+
+def download_batch(codes: list, year: int = 2025) -> dict:
+    """批量下载一批 code 的 PDF(ensure_pdf)。前端分块调用。逐个返回:
+    status ∈ cached(本已有) | downloaded(新下) | failed(无url/下载失败)。"""
+    from src.parsers.infra.pdf_locator import ensure_pdf
+    out = []
+    for code in (codes or []):
+        try:
+            had = _has_cache(code, year)
+            path = ensure_pdf(code, year, download=True)
+            out.append({"code": code, "status": ("cached" if had else "downloaded") if path else "failed"})
+        except Exception as e:
+            out.append({"code": code, "status": "failed", "err": str(e)[:80]})
+    return {"results": out}
