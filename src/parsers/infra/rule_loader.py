@@ -10,6 +10,7 @@
   aliases = rule["revenue_breakdown"]["header_aliases"]
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -40,3 +41,20 @@ def load_rule(field: str, reload: bool = False) -> Optional[dict]:
 
 def clear_cache():
     _CACHE.clear()
+
+
+@contextmanager
+def override_rule(field: str, rule: dict):
+    """临时把某字段的活动规则替换为 rule（供规则版本扫描/自愈用），退出后恢复原状。
+    所有走 load_rule(field) 的读取点（营收的认列 header_aliases、切桶 dimensions，
+    以及 table_recall 的召回 dimensions）都会立即看到这个覆盖——无需改动各读取点。"""
+    had = field in _CACHE
+    prev = _CACHE.get(field)
+    _CACHE[field] = rule
+    try:
+        yield
+    finally:
+        if had:
+            _CACHE[field] = prev
+        else:
+            _CACHE.pop(field, None)

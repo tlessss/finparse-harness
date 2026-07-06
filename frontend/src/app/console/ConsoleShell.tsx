@@ -10,8 +10,9 @@ const NAV = [
   { href: "/console/review", label: "审核认证关" },
   { href: "/console/control", label: "批量控制" },
   { href: "/console/testing", label: "测试" },
-  { href: "/console/workflow", label: "工作流" },
+  { href: "/console/flow", label: "解析流程图" },
   { href: "/console/pipeline", label: "流水线成功率" },
+  { href: "/console/failures", label: "失败分析" },
   { href: "/console/agents", label: "Agent 管理" },
 ] as const;
 

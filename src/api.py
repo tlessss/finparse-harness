@@ -943,6 +943,13 @@ def pipeline_result_api():
     return result_from_db()
 
 
+@app.get("/pipeline/failures")
+def pipeline_failures_api(year: int = 2025, field: str = "revenue_breakdown"):
+    """逐份失败分析(实时读 DB,不重解):每份非 committed 的结局/类别/占锚/LLM是否跑成 + 类别汇总。"""
+    from src.pipeline import failure_analysis
+    return failure_analysis(year, field)
+
+
 @app.get("/pipeline/progress")
 def pipeline_progress_api():
     """实时批跑进度：phase / i / total / current(正在跑哪家) / done(已完成结局)。"""
@@ -984,6 +991,27 @@ def pipeline_run_api(req: PipelineRunRequest):
     res["codes"] = req.codes
     save_result(res)
     return res
+
+
+class PipelineRunLLMRequest(BaseModel):
+    codes: list = None            # None/空 → 跑 DB 里已有的全部；给 codes 只跑这些(增量,老数据不动)
+    year: int = 2025
+    field: str = "revenue_breakdown"
+
+
+@app.post("/pipeline/run_llm")
+def pipeline_run_llm_api(req: PipelineRunLLMRequest):
+    """后台跑**完整 LLM 流水线**(复核+选表自愈+L2改规则+诊断)并写实时进度。
+    立即返回，前端轮询 /pipeline/progress 看进度、/pipeline/result 看网格实时长。已在跑则拒绝重入。"""
+    import threading
+    from src.pipeline import run_full_pass, load_progress
+    prog = load_progress() or {}
+    if prog.get("phase") not in (None, "idle", "done"):
+        return {"started": False, "error": "已有跑批在进行中", "phase": prog.get("phase"), "i": prog.get("i"), "total": prog.get("total")}
+    codes = req.codes or None
+    threading.Thread(target=lambda: run_full_pass(req.year, req.field, codes=codes, log=lambda *_: None),
+                     daemon=True).start()
+    return {"started": True, "n": len(codes) if codes else "all", "field": req.field}
 
 
 # ── 启动入口 ──

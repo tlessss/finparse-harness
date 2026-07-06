@@ -79,12 +79,58 @@ def _from_tables(code: str, year: int) -> Dict[str, float]:
     return out
 
 
+def _row_money(row) -> Optional[float]:
+    """行里第一个能解析成金额的单元格(跳过名称列)。"""
+    for c in row[1:] if len(row) > 1 else row:
+        m = parse_money(c) if c else None
+        if m is not None and m > 0:
+            return m
+    return None
+
+
+_UNIT_MULTS = (1, 10000, 1000, 100000000)   # 元/万元/千元/亿元
+
+
+def _derive_main_business(code: str, year: int, revenue: float) -> Optional[float]:
+    """给金额锚的**第二口径**:主营业务收入。会计准则里维度构成表披露的是"主营业务分行业/产品/地区",
+    Σ分项 = 主营 ≤ 营业收入(差的是其他业务收入,常不按维度拆)。所以正确的主营构成表可能对不上营收锚、只对主营锚。
+    抽法:找一张同时有"主营业务(收入)"和"其他业务(收入)"两行、且**两者之和≈营业收入**(试单位倍数)的表,取主营那行。
+    两者和≈营收 = 交叉校验,确保抽的是营收拆分表、且单位对。抽不到 → None(退回只用营收锚)。"""
+    if not revenue:
+        return None
+    for t in (get_tables(code, year) or []):
+        g = t.get("table") or []
+        names = "".join((row[0] or "") for row in g if row)   # 快速预筛:名称列同时含两标记才细看
+        if "主营业务" not in names or "其他业务" not in names:
+            continue
+        main = other = None
+        for row in g:
+            name = _norm(row[0] if row else "")
+            v = _row_money(row)
+            if v is None:
+                continue
+            if "主营业务" in name and main is None:
+                main = v
+            elif "其他业务" in name and other is None:
+                other = v
+        if main and other:
+            for mult in _UNIT_MULTS:
+                if abs((main + other) * mult - revenue) <= 0.03 * revenue:
+                    return main * mult
+    return None
+
+
 def get_anchors(code: str, year: int) -> Dict[str, float]:
-    """返回 {revenue, cost, rnd_expense}（抽不到的键缺省）。DB 为主、利润表兜底，缓存。"""
+    """返回 {revenue, cost, rnd_expense, [main_revenue]}（抽不到的键缺省）。DB 为主、利润表兜底，缓存。
+    main_revenue = 主营业务收入,金额锚的第二口径(见 _derive_main_business)。"""
     ck = f"{code}_{year}"
     if ck in _CACHE:
         return _CACHE[ck]
-    a = _from_db(code, year) or _from_tables(code, year)
+    a = dict(_from_db(code, year) or _from_tables(code, year))
+    if a.get("revenue"):
+        mb = _derive_main_business(code, year, a["revenue"])
+        if mb and mb < a["revenue"]:                     # 主营应 ≤ 营收
+            a["main_revenue"] = mb
     _CACHE[ck] = a
     return a
 

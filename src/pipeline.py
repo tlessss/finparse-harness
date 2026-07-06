@@ -23,6 +23,11 @@ from src.parsers.revenue_router import field_plausibility
 FIELDS = ["revenue_breakdown", "cost_breakdown", "rnd_info",
           "employees", "top_clients", "top_suppliers"]
 
+# 字段 → 其 base 规则文件名(load_rule 的键)。只有有规则文件的字段才走版本池。
+_RULE_FILE = {"revenue_breakdown": "revenue", "cost_breakdown": "cost"}
+# 字段 → 规则 YAML 里的顶层 section 键(delta 挂在它下面)。
+_RULE_KEY = {"revenue_breakdown": "revenue_breakdown", "cost_breakdown": "cost_breakdown"}
+
 
 def _pdf(code: str, year: int) -> Optional[str]:
     hits = sorted(glob.glob(str(Config.PDF_CACHE_DIR / f"{code}_{year}*.pdf")))
@@ -52,6 +57,66 @@ def _cold_parse_full(code: str, year: int, field: str, tables, pdf: str):
         return None, {}
 
 
+def _parse_versioned(code, year, field, tables, pdf, anchors, spec) -> Dict:
+    """base 优先 → 不过锚则扫规则版本池，取第一个过锚的版本。
+    返回 {value, sig, version, sweep}：
+      version='base'      —— base 就过锚，或池里也没有过锚的（原样退回 base 结果）
+      version=<版本 id>   —— 该版本救活了(过锚)
+      sweep=[{id, ok, note}, ...] —— 试过哪些版本、各自过没过（前端/DB 可看）。
+    base 优先 = 结构上不回归：base 过锚的报告直接返回，不动版本池。"""
+    base_val = _cold_parse(code, year, field, tables, pdf)
+    base_sig = field_plausibility(spec, base_val, anchors or {}) if base_val else {}
+    # base 已过锚 / 无锚字段 → 直接收工（无锚判不了，不折腾）
+    if not spec.anchor_key or base_sig.get("confidence") == "high":
+        return {"value": base_val, "sig": base_sig, "version": "base", "sweep": []}
+
+    # 不过锚（或没解出）且有锚 → ① 扫规则版本池 ② 跨页拼接兜底（都不发 LLM）
+    sweep = []
+    rule_file = _RULE_FILE.get(field)
+    if rule_file:
+        from src.parsers.infra.rule_versions import load_versions, merged_rule
+        from src.parsers.infra.rule_loader import override_rule, load_rule
+        for ver in load_versions(rule_file):
+            merged = merged_rule(load_rule(rule_file), ver)
+            with override_rule(rule_file, merged):
+                val = _cold_parse(code, year, field, tables, pdf)
+            sig = field_plausibility(spec, val, anchors or {}) if val else {}
+            ok = sig.get("confidence") == "high"
+            sweep.append({"id": ver["id"], "ok": ok, "note": ver.get("note")})
+            if ok:                                                # 第一个过锚的版本 = 赢家
+                return {"value": val, "sig": sig, "version": ver["id"], "sweep": sweep}
+
+    # 跨页拼接兜底：只对有规则文件的分项字段(营收/成本)试，其它字段(研发/员工/前五大)行为与改动前完全一致。
+    if rule_file:
+        st = _stitch_cold(code, year, field, tables, pdf, anchors, spec)  # 跨页续表拼接(锚闸)
+        if st:
+            st["sweep"] = sweep
+            return st
+    return {"value": base_val, "sig": base_sig, "version": "base", "sweep": sweep}
+
+
+def _stitch_cold(code, year, field, tables, pdf, anchors, spec) -> Optional[Dict]:
+    """冷启动跨页兜底:确定性选中表若因跨页被截断而不过锚 → 拼物理紧邻的下一页续表再判锚。
+    过锚才返回(version='base+跨页拼接'),否则 None——锚闸兜底,和选表自愈里那套同源、只是这里不发 LLM。"""
+    try:
+        from src.parsers.infra.table_recall import select_table
+        pick = select_table(tables, code, year, _FIELD_SIG.get(field, "revenue"))
+    except Exception:
+        return None
+    if not pick or not pick.get("table"):
+        return None
+    v0 = _reparse_forced(code, year, field, pick, tables, pdf)
+    s0 = field_plausibility(spec, v0 or {}, anchors or {})
+    if s0.get("confidence") == "high":                            # 单张已过锚(理论上不会到这) → 不管
+        return None
+    _, val, sig, stitched = _stitch_for_anchor(
+        code, year, field, pick, tables, pdf, anchors or {}, v0, s0)
+    if stitched:
+        return {"value": val, "sig": sig, "version": "base+跨页拼接",
+                "sweep": [], "stitched_pages": stitched}
+    return None
+
+
 def run_field(code: str, year: int, field: str, anchors: Dict = None,
               tables=None, pdf: str = None, use_llm: bool = False) -> Dict:
     """跑一个字段到出口。确定性部分不发 LLM；use_llm=True 才补 verify/judge_diagnose。
@@ -77,18 +142,20 @@ def run_field(code: str, year: int, field: str, anchors: Dict = None,
         rt = {"status": "error"}
     if rt.get("status") == "routed":
         rec = {"field": field, "via": "routed", "outcome": "green",
-               "confidence": (rt.get("signal") or {}).get("confidence")}
+               "confidence": (rt.get("signal") or {}).get("confidence"), "value": rt.get("result")}
         if use_llm:
             rec.update(_green_llm(code, year, field, rt.get("result"), rt.get("signal") or {}, spec))
         return rec
 
-    # ② 冷启动兜底：无认证解析器时引擎默认解析器 + 锚判
-    value = _cold_parse(code, year, field, tables, pdf)
+    # ② 冷启动兜底：无认证解析器时引擎默认解析器 + 锚判。
+    #    base 优先 → 不过锚扫规则版本池（base-first 结构上不回归）。
+    pv = _parse_versioned(code, year, field, tables, pdf, anchors, spec)
+    value, sig = pv["value"], pv["sig"]
     if not value:
         return {"field": field, "outcome": "no_data", "via": "cold"}   # 解析器没解出东西 → needs_write
-    sig = field_plausibility(spec, value, anchors or {})
     conf = sig.get("confidence")
-    rec = {"field": field, "via": "cold", "confidence": conf, "anchored": sig.get("anchored")}
+    rec = {"field": field, "via": "cold", "confidence": conf, "anchored": sig.get("anchored"),
+           "value": value, "rule_version": pv["version"], "version_sweep": pv["sweep"]}
 
     if conf == "high":                                          # 绿灯：锚确认
         rec["outcome"] = "green"
@@ -105,38 +172,255 @@ def run_field(code: str, year: int, field: str, anchors: Dict = None,
 
 
 def _green_llm(code, year, field, value, sig, spec) -> Dict:
-    """绿灯 → 复核 agent 审盲区（含选错表/跨页体检）；pass → 入库，hold → 交人工。"""
+    """绿灯 → 复核；pass → 入库；复核判"选错表" → 选表自愈重选重解析再复核；其它 hold → 交人工。"""
     try:
         from src.agents.llm_judge import verify_field
         from src.eval.triage_queue import _auto_commit, enqueue
-        v = verify_field(field, code, year, value, sig=sig, spec=spec)
+        v = verify_field(field, code, year, value, sig=sig, spec=spec, debug=True)
         verdict = v.get("verdict")
-        llm = {"llm_kind": "verify", "verdict": verdict,
-               "suspects": v.get("suspects") or v.get("issues") or [], "summary": v.get("summary")}
+        suspects = v.get("suspects") or v.get("issues") or []
+        chat = {"system": v.get("_system"), "prompt": v.get("_prompt"), "reply": v.get("_raw")}
+        llm = {"llm_kind": "verify", "verdict": verdict, "suspects": suspects,
+               "summary": v.get("summary"), "chat": chat}
         if verdict == "pass":
             return {"outcome": "committed", "committed": _auto_commit(code, year, field, value, sig), **llm}
-        issues = ", ".join(str(s.get("issue")) for s in llm["suspects"] if s.get("issue"))[:120]
+        if any(s.get("issue") == "wrong_table" for s in suspects):     # 复核喊选错表 → 选表自愈
+            rec, healed = _heal_and_verify(code, year, field, spec)
+            if healed:
+                return {**llm, **rec}                                  # 留第一次复核 verdict/suspects + 自愈结果
+            heal = rec.get("heal") or {}
+            chosen_tbl = heal.pop("_chosen_table", None)               # 别让选中表网格进 DB
+            if heal.get("outcome") == "still_bad" and chosen_tbl:      # 选对表但解不出 → L2 改规则自愈
+                rh_rec = _rule_heal_and_verify(code, year, field, chosen_tbl, spec)
+                if rh_rec:
+                    return {**llm, **rh_rec, "heal_probe": heal}
+            enqueue(code, year, field, "needs_human", note="选表自愈未选到更好的表")
+            return {"outcome": "verify_hold", "handed_to_human": True, **llm, **rec}
+        issues = ", ".join(str(s.get("issue")) for s in suspects if s.get("issue"))[:120]
         enqueue(code, year, field, "needs_human", note=f"verify hold: {issues or llm['summary'] or ''}"[:200])
         return {"outcome": "verify_hold", "handed_to_human": True, **llm}
     except Exception as e:
         return {"llm_error": str(e)[:100]}
 
 
-def _nongreen_llm(code, year, field) -> Dict:
-    """非绿灯 → judge_diagnose 第一阶段（judge_chat 内已含 交人工/落台账 的确定性分流）。"""
+def _diagnose_category(code, year, field) -> str:
+    """诊断路由器:把非绿灯归到哪一类(复用失败分析的确定性归类 `_classify_failure`)。
+    用 heal_debug 的逐维分项和 + 锚。无 verify(此刻还没跑复核),故只用确定性信号。"""
     try:
-        from src.agents.judge_diagnose_agent import prepare_judge_diagnose
-        from src.console_service import judge_chat
-        prep = prepare_judge_diagnose(code, year, field)
-        if prep.get("error"):
-            return {"llm_error": prep["error"]}
-        res = judge_chat(code, year, field, prep["messages"])
-        return {"llm_kind": "diagnose", "decision": res.get("decision"),
-                "root_cause": res.get("root_cause"), "next_action": res.get("next_action"),
-                "evidence": res.get("evidence"), "summary": res.get("summary"),
-                "handed_to_human": res.get("handed_to_human")}
+        from src.console_service import heal_debug
+        d = heal_debug(code, year, field) or {}
+    except Exception:
+        d = {}
+    anchor = d.get("anchor")
+    per_dim = d.get("dims") or []
+    ndim = len([x for x in per_dim if x.get("sum")])
+    best = (max((x.get("sum") or 0) for x in per_dim) / anchor) if (anchor and per_dim) else 0
+    return _classify_failure("non_green", "", {}, anchor, per_dim, best, ndim)
+
+
+def _run_diagnose(code, year, field, heal_probe=None) -> Dict:
+    """跑 judge_diagnose 表层诊断(链尽时的出口)。"""
+    from src.agents.judge_diagnose_agent import prepare_judge_diagnose
+    from src.console_service import judge_chat
+    prep = prepare_judge_diagnose(code, year, field)
+    if prep.get("error"):
+        return {"llm_error": prep["error"]}
+    res = judge_chat(code, year, field, prep["messages"])
+    msgs = prep.get("messages") or [{}, {}]
+    out = {"llm_kind": "diagnose", "decision": res.get("decision"),
+           "root_cause": res.get("root_cause"), "next_action": res.get("next_action"),
+           "evidence": res.get("evidence"), "summary": res.get("summary"),
+           "handed_to_human": res.get("handed_to_human"),
+           "diag_chat": {"system": (msgs[0] or {}).get("content"),
+                         "prompt": (msgs[1] or {}).get("content"), "reply": res.get("reply")}}
+    if heal_probe:
+        out["heal_probe"] = heal_probe
+    return out
+
+
+def _nongreen_llm(code, year, field) -> Dict:
+    """非绿灯 → **按诊断归类派 healer**(Tier 1 路由器):
+      过计 → 直接 L2 切桶(选表自愈救不了过计);无锚 → 直接诊断(选表/L2 都靠锚,没锚白跑,取锚自愈 Phase2 再接);
+      其余(选错表/全空/严重缺/单维不齐/…)→ 选表自愈优先 → still_bad 则 L2 → 仍不行诊断。
+    每个 healer 内部仍走过锚+复核双闸。结果带 routed_cat(诊断归类,前端可见)。"""
+    try:
+        spec = get_spec(field)
+        cat = _diagnose_category(code, year, field)
+
+        # 无锚(取不到营收锚,多为金融股):选表/L2 都要靠锚判过没过,没锚白跑 → 直接诊断(Phase2 接取锚自愈)。
+        if cat == "无锚":
+            out = _run_diagnose(code, year, field)
+            out["routed_cat"] = cat
+            out["note"] = "无锚(待 Phase2 取锚自愈/金融域外)"
+            return out
+
+        # 过计(某桶 >锚,多维堆一桶/合计混入):**先试 L2 切桶**(选表自愈换表救不了"堆桶");
+        # L2 入库就收工,没入库再落回选表自愈级联(过计也可能是"选错了一张更大的表",那才靠选表自愈)。
+        if cat == "过计":
+            from src.parsers.infra.table_recall import select_table
+            pick = select_table(get_tables(code, year), code, year, _FIELD_SIG.get(field, "revenue"))
+            if pick and pick.get("table"):
+                rh = _rule_heal_and_verify(code, year, field, pick, spec)
+                if rh and rh.get("outcome") == "committed":
+                    return {**rh, "routed_cat": cat}
+
+        # 通用级联:选表自愈优先 → still_bad L2 → 诊断
+        rec, healed = _heal_and_verify(code, year, field, spec)
+        if healed:
+            return {**rec, "routed_cat": cat}
+        heal = rec.get("heal") or {}
+        chosen_tbl = heal.pop("_chosen_table", None)
+        if heal.get("outcome") == "no_pick":
+            from src.eval.triage_queue import enqueue
+            enqueue(code, year, field, "needs_human", note="no_such_table: 源文无营收构成表")
+            return {"llm_kind": "no_such_table", "outcome": "no_such_table",
+                    "handed_to_human": True, "heal_probe": heal, "routed_cat": cat}
+        if heal.get("outcome") == "still_bad" and chosen_tbl:
+            rh_rec = _rule_heal_and_verify(code, year, field, chosen_tbl, spec)
+            if rh_rec:
+                return {**rh_rec, "heal_probe": heal, "routed_cat": cat}
+        return {**_run_diagnose(code, year, field, rec.get("heal")), "routed_cat": cat}
     except Exception as e:
         return {"llm_error": str(e)[:100]}
+
+
+_ANCHOR_KEY = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd_expense"}
+
+
+def _reparse_forced(code, year, field, chosen_item, tables, pdf):
+    """用 LLM 选中的表强制重解析（绕过 select_table，走解析器的 forced_sel 口子）。"""
+    from src.engine_orchestrator import FinParseAI
+    from src.parsers.infra.table_recall import _best_col_vs_anchor
+    from src.eval.anchors import get_anchors
+    anc = (get_anchors(code, year) or {}).get(_ANCHOR_KEY.get(field, "revenue"))
+    amount_col = None
+    if anc:
+        amount_col, _ = _best_col_vs_anchor(chosen_item.get("table") or [], anc)
+    sel = {**chosen_item, "amount_col": amount_col, "via": "llm_select"}
+    try:
+        parser = FinParseAI()._get_parser(field, pdf)
+        return parser.parse(pdf, pre_scan=tables, code=code, year=year, forced_sel=sel).get(field)
+    except TypeError:
+        return None                                   # 该字段解析器还没开 forced_sel 口子(暂只营收)
+
+
+def heal_select(code, year, field="revenue_breakdown") -> Dict:
+    """选表自愈：LLM 选表 agent 重选 → forced 重解析 → 重判锚。
+    outcome ∈ green(重选后过锚) | caliber_gap(选对但主营口径差) | still_bad(仍不对)。"""
+    from src.agents.select_table_agent import select_table_llm
+    sr = select_table_llm(code, year, field, debug=True)
+    select_chat = {"prompt": sr.get("_prompt"), "reply": sr.get("_raw")}   # 选表 agent 的对话留痕
+    chosen = sr.get("chosen_table")
+    if not chosen or not chosen.get("table"):
+        return {"healed": False, "outcome": "no_pick", "select_reason": sr.get("reason"),
+                "select_chat": select_chat}
+    tables, pdf = get_tables(code, year), _pdf(code, year)
+    from src.eval.anchors import get_anchors
+    anchors = get_anchors(code, year) or {}
+    value = _reparse_forced(code, year, field, chosen, tables, pdf)
+    sig = field_plausibility(get_spec(field), value or {}, anchors)
+    stitched = None
+    if sig.get("confidence") != "high":                            # 不过锚 → 试跨页续表拼接(锚闸兜底)
+        chosen, value, sig, stitched = _stitch_for_anchor(
+            code, year, field, chosen, tables, pdf, anchors, value, sig)
+    conf = sig.get("confidence")
+    outcome = "green" if conf == "high" else ("caliber_gap" if sr.get("caliber_gap") else "still_bad")
+    from src.agents.llm_judge import _grid_to_text
+    return {"healed": True, "outcome": outcome, "chosen_page": sr.get("chosen_page"),
+            "chosen_caption": sr.get("chosen_caption"), "select_stage": sr.get("stage"),
+            "select_reason": sr.get("reason"), "caliber_gap": sr.get("caliber_gap"),
+            "value": value, "confidence": conf, "select_chat": select_chat,
+            "stitched_pages": stitched,                             # 跨页拼接了哪些页(None=没拼)
+            "_chosen_table": chosen,                                # 选中表对象(内部用:L2改规则在它上面重解;持久化前会 pop)
+            "source": _grid_to_text(chosen.get("table") or [])}     # 纠正后那张表 → 给复核当源文
+
+
+def _stitch_for_anchor(code, year, field, chosen, tables, pdf, anchors, value0, sig0):
+    """跨页续表拼接(锚闸兜底):选中表不过锚时,把它物理紧邻的续表逐张并进来重解,
+    一旦过锚就采纳合并表。合并不过锚就不采纳(锚闸=安全,不怕误召续表)。
+    返回 (最终选中表, value, sig, stitched_pages)。没拼/没帮助 → 返回原样、stitched=None。"""
+    from src.parsers.infra.table_recall import following_tables, merge_tables
+    conts = following_tables(tables, chosen)
+    if not conts:
+        return chosen, value0, sig0, None
+    merged = chosen
+    pages = [chosen.get("page")]
+    for c in conts:
+        merged = merge_tables(merged, c)
+        pages.append(c.get("page"))
+        v = _reparse_forced(code, year, field, merged, tables, pdf)
+        s = field_plausibility(get_spec(field), v or {}, anchors)
+        if s.get("confidence") == "high":                          # 拼到过锚 → 采纳
+            return merged, v, s, pages
+    return chosen, value0, sig0, None                              # 拼了也不过锚 → 不采纳
+
+
+# 选表自愈后第二次复核的信任提示:选表 agent 已确认表 → 别再重判选表,只逐项核数据
+_TRUST_NOTE = ("\n【选表已确认】上面这张表是选表 agent 从全表里认定的**正确营业收入构成表**"
+               "(已排除销售表/分部表/毛利率表等)。因此**不要再判 wrong_table,也不要因"
+               "'合计略小于营业收入 / 维度少'就判不完整/跨页截断**——分行业/分产品合计略小于营收"
+               "通常是'其他业务收入'不按此维度拆分(主营业务口径),属正常。你只需**逐项核对数据**"
+               "(名称有没有抠错、金额有没有取错列/单位),逐项对得上就 pass。\n")
+
+
+def _heal_and_verify(code, year, field, spec):
+    """选表自愈:选表 agent 重选 → 重解析 → 若选到更好的表(过锚/口径差)→ 复核(信任源文,只核数据) → 入库/人工。
+    返回 (rec, healed)：healed=False 表示没选到更好的表(仍 still_bad/no_pick),交回上层走诊断。"""
+    from src.agents.llm_judge import verify_field
+    from src.eval.triage_queue import _auto_commit, enqueue
+    heal = heal_select(code, year, field)
+    src = heal.pop("source", None)
+    if src:
+        heal["source_preview"] = "\n".join(src.split("\n")[:24])       # 重选那张表(溯源前24行),给前端
+    ho = heal.get("outcome")
+    if ho in ("green", "caliber_gap") and heal.get("value"):           # 选到更好的表 → 走复核
+        v2 = verify_field(field, code, year, heal["value"], spec=spec,
+                          source_override=src, extra_note=_TRUST_NOTE, debug=True)
+        rd = {"verdict": v2.get("verdict"), "suspects": v2.get("suspects") or [], "summary": v2.get("summary")}
+        common = {"llm_kind": "verify", "healed_select": True, "heal": heal,
+                  "reverify": v2.get("verdict"), "reverify_detail": rd,
+                  "reverify_chat": {"system": v2.get("_system"), "prompt": v2.get("_prompt"), "reply": v2.get("_raw")}}
+        if v2.get("verdict") == "pass":
+            return {"outcome": "committed", "caliber_gap": (ho == "caliber_gap"),
+                    "committed": _auto_commit(code, year, field, heal["value"], {"confidence": "high"}), **common}, True
+        enqueue(code, year, field, "needs_human", note=f"选表自愈→{ho}→复核hold p{heal.get('chosen_page')}"[:200])
+        return {"outcome": "verify_hold", "handed_to_human": True, **common}, True
+    return {"heal": heal}, False                                       # 没更好的表 → 交回诊断
+
+
+def _rule_heal_and_verify(code, year, field, chosen, spec) -> Optional[Dict]:
+    """L2 改规则自愈:选对表但 base 解错 → LLM 提规则 delta → 合并重解过锚 → 复核(信任源文) →
+    pass 则入库 + save_version 把这条规则固化进池;否则交人工。
+    返回 rec(dict)：outcome ∈ committed / verify_hold；None 表示 delta 也修不了(交回诊断/人工)。"""
+    from src.agents.rule_heal_agent import rule_heal
+    from src.agents.llm_judge import verify_field, _grid_to_text
+    from src.eval.triage_queue import _auto_commit, enqueue
+    from src.parsers.infra.rule_versions import save_version
+    rh = rule_heal(code, year, field, chosen, debug=True)
+    common = {"llm_kind": "rule_heal",
+              "rule_heal": {k: rh.get(k) for k in
+                            ("outcome", "delta", "note", "reason", "fixable_claim", "dim_diff_after")},
+              "rule_heal_chat": rh.get("chat")}
+    if not rh.get("ok"):
+        return None                                                    # 加规则也修不了 → 交回上层诊断
+    # 过锚了 → 走复核(信任这张已选对的表,只逐项核数据)。入库条件与第一/二次一致。
+    src = _grid_to_text(chosen.get("table") or [])
+    v2 = verify_field(field, code, year, rh["value"], spec=spec,
+                      source_override=src, extra_note=_TRUST_NOTE, debug=True)
+    common["reverify"] = v2.get("verdict")
+    common["reverify_detail"] = {"verdict": v2.get("verdict"), "suspects": v2.get("suspects") or [],
+                                 "summary": v2.get("summary")}
+    common["reverify_chat"] = {"system": v2.get("_system"), "prompt": v2.get("_prompt"), "reply": v2.get("_raw")}
+    if v2.get("verdict") == "pass":
+        vid = f"rev_heal_{code}_{year}"
+        path = save_version(_RULE_FILE.get(field, "revenue"), vid,
+                            {_RULE_KEY.get(field, "revenue_breakdown"): rh["delta"]},
+                            note=rh.get("note"), meta={"origin": f"{code}_{year}"})
+        return {"outcome": "committed", "healed_rule": True,
+                "committed": _auto_commit(code, year, field, rh["value"], {"confidence": "high"}),
+                "rule_version_saved": vid, "rule_version_path": path, **common}
+    enqueue(code, year, field, "needs_human", note=f"L2改规则过锚但复核hold p{chosen.get('page')}"[:200])
+    return {"outcome": "verify_hold", "handed_to_human": True, **common}
 
 
 def run_report(code: str, year: int, fields: List[str] = None, use_llm: bool = False) -> Dict:
@@ -210,6 +494,7 @@ def field_chain(code: str, year: int, field: str) -> Dict:
         return {**out, "outcome": "no_data", "reason": "解析为空（选中表结构/认列失败）"}
     dims_present = list(value.keys()) if isinstance(value, dict) else ["<list>"]
     add("解析", True, {"via": "认证解析器" if routed else "冷启动", "dims": dims_present})
+    out["value"] = value                                          # 解析出的结构化 JSON
 
     # 溯源：每个解析值出自哪一页 + 选中表原文（让"数字从哪来"可核）
     prov_items = [{"path": k, "page": v.get("page")} for k, v in prov.items()
@@ -261,6 +546,84 @@ def field_chain(code: str, year: int, field: str) -> Dict:
     return {**out, "outcome": outcome, "reason": reason, "via": "routed" if routed else "cold"}
 
 
+def _classify_failure(o, reason, v, anchor, per_dim, best, ndim) -> str:
+    """从 DB 已存的 chain(锚判逐维) + verify(复核疑点) 给失败归类——不重解。"""
+    susp = (v.get("suspects") or []) + ((v.get("reverify_detail") or {}).get("suspects") or [])
+    iss = {s.get("issue") for s in susp if s.get("issue")}
+    if o == "no_such_table":
+        return "真无表"
+    if not anchor:
+        return "无锚"
+    if not per_dim or ndim == 0:
+        return "全空"
+    if best > 1.05:
+        return "过计"
+    if best < 0.5:
+        return "严重缺"
+    if "amount_error" in iss:
+        return "取错列/单位"
+    if "name_error" in iss:
+        return "抠错名称"
+    if "wrong_table" in iss:
+        return "选错表"
+    if 0.9 <= best <= 1.03 and ndim >= 2:
+        return "单维不齐"
+    return "中度缺"
+
+
+# 类别 → (一句原因, 自愈落点, 能力现状 have/light/new/out)
+_CAT_META = {
+    "单维不齐":  ("有一维精确=锚,另一维短→被全维闸卡", "≥1维过锚交复核 / 短维补行", "light"),
+    "全空":      ("一维都没解出(选表选错/认列全废)", "选表自愈 / L2认列", "have"),
+    "无锚":      ("金融股(银行/券商),无营收构成锚", "移出失败 / 取锚自愈", "out"),
+    "过计":      ("某桶和 >锚(多维堆一桶/合计混入)", "L2切桶", "have"),
+    "选错表":    ("复核判选错表,自愈没救回", "选表自愈多轮", "light"),
+    "严重缺":    ("仅解出<50%锚(选到小表/大漏行)", "选表自愈多轮 / 抽表自愈", "new"),
+    "取错列/单位": ("金额取错列或单位没换算", "L2扩单位override", "light"),
+    "抠错名称":  ("名称列抠错", "L2加name别名", "light"),
+    "中度缺":    ("解出50~90%锚(漏行/漏维)", "跨页拼接 / 抽表自愈", "new"),
+    "真无表":    ("报告确无营收构成表", "正确判缺失(已达成)", "have"),
+}
+_CAT_ORDER = ["单维不齐", "全空", "无锚", "过计", "选错表", "严重缺", "取错列/单位", "抠错名称", "中度缺", "真无表"]
+
+
+def failure_analysis(year: int = 2025, field: str = "revenue_breakdown") -> Dict:
+    """从 DB 汇成"逐份失败分析"(供前端实时页):每份非 committed 的结局/类别/占锚/LLM是否跑成。
+    全部读已存的 chain+verify,不重解 → 秒回。"""
+    from src.eval.test_store import list_latest_runs
+    runs = [r for r in list_latest_runs(year, [field]) if r["field"] == field]
+    tally = Counter()
+    items = []
+    for r in runs:
+        o = r["outcome"]
+        tally[o] += 1
+        if o == "committed":
+            continue
+        v = r.get("verify") or {}
+        ch = r.get("chain") or {}
+        anchor, per_dim = None, []
+        for s in (ch.get("stages") or []):
+            d = s.get("detail")
+            if s.get("name") == "锚判" and isinstance(d, dict):
+                anchor, per_dim = d.get("anchor"), (d.get("per_dim") or [])
+        ndim = len([d for d in per_dim if d.get("sum")])
+        best = (max((d.get("sum") or 0) for d in per_dim) / anchor) if (anchor and per_dim) else 0
+        cat = _classify_failure(o, ch.get("reason"), v, anchor, per_dim, best, ndim)
+        items.append({"code": r["stock_code"], "outcome": o, "llm_ran": bool(v),
+                      "best": round(best, 2), "ndim": ndim, "cat": cat,
+                      "reason": (ch.get("reason") or "")[:120]})
+    by_cat = Counter(x["cat"] for x in items)
+    cats = [{"cat": c, "n": by_cat[c], **dict(zip(("why", "heal", "tag"), _CAT_META[c]))}
+            for c in _CAT_ORDER if by_cat.get(c)]
+    items.sort(key=lambda x: (_CAT_ORDER.index(x["cat"]) if x["cat"] in _CAT_ORDER else 99, x["code"]))
+    committed = tally.get("committed", 0)
+    denom = sum(tally.values()) - tally.get("no_such_table", 0) - tally.get("no_input", 0) - by_cat.get("无锚", 0)
+    return {"year": year, "field": field, "total": sum(tally.values()),
+            "committed": committed, "success_rate": round(committed / denom, 3) if denom else None,
+            "denom": denom, "n_fail": len(items), "llm_missed": sum(1 for x in items if not x["llm_ran"]),
+            "tally": dict(tally), "cats": cats, "items": items}
+
+
 _RESULT_PATH = "goldset/pipeline_result.json"
 
 
@@ -281,11 +644,12 @@ def load_result(path: str = _RESULT_PATH) -> Optional[Dict]:
 
 def _rate(cnt: Counter) -> Dict:
     # green=过锚待复核；committed=复核pass已入库；verify_hold=复核否决(假绿灯)→人工
+    # no_such_table=选表agent确认源文无此构成表 → 剔出分母(数据不存在,不算失败)
     anchored = cnt["green"] + cnt["committed"] + cnt["verify_hold"] + cnt["non_green"] + cnt["no_data"]
     success = cnt["green"] + cnt["committed"]      # 过锚且未被复核否决（复核跑完后 green→0，只剩 committed）
     return {"green": cnt["green"], "committed": cnt["committed"], "verify_hold": cnt["verify_hold"],
             "non_green": cnt["non_green"], "no_data": cnt["no_data"],
-            "no_anchor": cnt["no_anchor"], "no_input": cnt["no_input"],
+            "no_anchor": cnt["no_anchor"], "no_input": cnt["no_input"], "no_such_table": cnt["no_such_table"],
             "success_rate": round(success / anchored, 3) if anchored else None,
             "anchored_denominator": anchored}
 
@@ -383,47 +747,72 @@ def run_batch_live(codes: List[str], year: int = 2025, fields: List[str] = None,
     return load_result()
 
 
-def run_verify_pass(year: int = 2025, field: str = "revenue_breakdown",
-                    fields: List[str] = None, log=print) -> Dict:
-    """对已有结果里该字段的**绿灯**逐个跑复核 agent（选错表/跨页体检 + 逐项对照）：
-    pass → 入库(committed)，hold → 交人工(verify_hold)。结果写回 + 实时进度。补齐"完整流程"的 LLM 那趟。"""
+_ANCHORED_GREEN = ("green", "committed", "verify_hold")
+
+
+def run_full_pass(year: int = 2025, field: str = "revenue_breakdown",
+                  codes: List[str] = None, log=print) -> Dict:
+    """对 DB 里全部报告跑**完整 LLM 流水线**：绿灯→复核(+选表自愈)，非绿灯→先选表 agent 再诊断。写 DB + 进度。"""
     import time
-    fields = fields or ["revenue_breakdown", "cost_breakdown", "rnd_info"]
-    res = load_result()
-    if not res:
-        return {"error": "无批量结果，先跑批量"}
-    reports = res["reports"]
-    codes = res.get("codes")
-    targets = [(r, next(f for f in r["fields"] if f["field"] == field))
-               for r in reports
-               if any(f["field"] == field and f["outcome"] == "green" for f in r["fields"])]
+    from src.eval.test_store import list_latest_runs
+    if codes is None:
+        codes = sorted({r["stock_code"] for r in list_latest_runs(year, [field]) if r["field"] == field})
+    total = len(codes)
+    state = {"phase": "verify", "total": total, "i": 0, "current": None,
+             "done": [], "started": time.time(), "updated": time.time()}
+    _write_progress(state)
+    for i, code in enumerate(codes, 1):
+        state.update(i=i, current=code, updated=time.time())
+        _write_progress(state)
+        rec = run_field(code, year, field, use_llm=True)
+        try:
+            save_chain_run(code, year, field)                 # 先存确定性阶段链路(展示用) → 点详情秒回、不再现场重解
+            save_verify_run(code, year, field, rec)           # 再叠复核/自愈结论(沿用刚存的 chain)
+        except Exception:
+            pass
+        state["done"].append({"code": code, "outcome": rec.get("outcome"),
+                              "outcomes": {field: rec.get("outcome")},   # 前端 live 视图两种读法都覆盖(单/复数)
+                              "healed": rec.get("healed_select"), "verdict": rec.get("verdict")})
+        state.update(updated=time.time())
+        _write_progress(state)
+        tag = " (选表自愈)" if rec.get("healed_select") else ""
+        tag += f" [{rec.get('root_cause')}]" if rec.get("llm_kind") == "diagnose" else ""
+        log(f"[{i}/{total}] {code} → {rec.get('outcome')}{tag}")
+    state.update(phase="done", current=None, updated=time.time())
+    _write_progress(state)
+    return result_from_db(year, [field])
+
+
+def run_verify_pass(year: int = 2025, field: str = "revenue_breakdown",
+                    target_outcomes=_ANCHORED_GREEN, log=print) -> Dict:
+    """对该字段所有"过锚绿灯"(green/committed/verify_hold)逐个跑复核 agent + 选表自愈：
+    pass → 入库，wrong_table → 选表自愈重选重解析，hold → 交人工。DB 原生,实时进度。"""
+    import time
+    from src.eval.test_store import list_latest_runs
+    targets = [r for r in list_latest_runs(year, [field])
+               if r["field"] == field and r["outcome"] in target_outcomes]
     total = len(targets)
     state = {"phase": "verify", "total": total, "i": 0, "current": None,
              "done": [], "started": time.time(), "updated": time.time()}
     _write_progress(state)
-    for i, (r, fo) in enumerate(targets, 1):
-        code = r["code"]
+    for i, r in enumerate(targets, 1):
+        code = r["stock_code"]
         state.update(i=i, current=code, updated=time.time())
         _write_progress(state)
-        rec = run_field(code, year, field, use_llm=True)          # 走绿灯 LLM 路径：复核→入库/人工
-        fo["outcome"] = rec.get("outcome", fo["outcome"])
-        fo["verify"] = {k: rec.get(k) for k in ("verdict", "summary", "handed_to_human", "suspects")
-                        if rec.get(k) is not None}
+        rec = run_field(code, year, field, use_llm=True)          # 复核(+选错表则选表自愈)
         try:
-            save_verify_run(code, year, field, rec)               # 复核结论写 DB
+            save_verify_run(code, year, field, rec)               # 结论 + 自愈信息写 DB
         except Exception:
             pass
-        state["done"].append({"code": code, "verdict": rec.get("verdict"), "outcome": rec.get("outcome")})
+        state["done"].append({"code": code, "verdict": rec.get("verdict"), "outcome": rec.get("outcome"),
+                              "healed": rec.get("healed_select")})
         state.update(updated=time.time())
         _write_progress(state)
-        agg = _aggregate(reports, fields, year)
-        if codes:
-            agg["codes"] = codes
-        save_result(agg)
-        log(f"[{i}/{total}] {code} verify={rec.get('verdict')} → {rec.get('outcome')}")
+        log(f"[{i}/{total}] {code} verify={rec.get('verdict')} → {rec.get('outcome')}"
+            + (" (选表自愈)" if rec.get("healed_select") else ""))
     state.update(phase="done", current=None, updated=time.time())
     _write_progress(state)
-    return load_result()
+    return result_from_db(year, [field])
 
 
 # ── DB 血缘(pipeline_runs) —— 存整条链路，读也从 DB ──
@@ -441,7 +830,10 @@ def save_verify_run(code: str, year: int, field: str, rec: Dict) -> None:
     """复核后再写一行：沿用上一条已存的链路，附上复核结论 + 更新 outcome。"""
     from src.eval.test_store import get_latest_run, save_run
     prev = get_latest_run(code, year, field) or {}
-    verify = {k: rec.get(k) for k in ("verdict", "summary", "handed_to_human", "suspects")
+    verify = {k: rec.get(k) for k in ("verdict", "summary", "handed_to_human", "suspects",
+                                      "heal", "healed_select", "reverify", "reverify_detail", "caliber_gap",
+                                      "llm_kind", "decision", "root_cause", "next_action", "evidence", "heal_probe",
+                                      "value", "chat", "reverify_chat", "diag_chat", "routed_cat")
               if rec.get(k) is not None}
     save_run(code, year, field, outcome=rec.get("outcome", prev.get("outcome")),
              via=prev.get("via"), reason=prev.get("reason"), chain=prev.get("chain"), verify=verify)

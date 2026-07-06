@@ -93,20 +93,27 @@ def _attach_confidence(spec: FieldSpec, value, anchors, sig: Dict) -> Dict:
     if not anchor:
         sig["anchored"], sig["confidence"] = None, "unknown"
         return sig
+    # 双口径:分项和 ≈ 营业收入 **或** ≈ 主营业务收入(各±3%)都算过锚。
+    # 依据会计准则:维度构成表披露的是"主营业务分…",Σ = 主营 ≤ 营收(差的是其他业务收入,常不按维度拆)。
+    # 只锚营收会把正确的主营构成表误杀;放宽口径是安全的——表身份/完整性由源文锚(复核)守。
+    alt = (anchors or {}).get("main_" + key)   # 主营口径(第二锚),取不到为 None
+
+    def _hit(s):
+        return abs(s - anchor) <= 0.03 * anchor or (alt and abs(s - alt) <= 0.03 * alt)
+
     if spec.cls == "B":
         total = (value or {}).get(spec.total_key)
-        anchored = bool(total and abs(total - anchor) <= 0.03 * anchor)
+        anchored = bool(total and _hit(total))
     else:
-        # A 类：各维度(行业/产品/地区/销售模式)是同一营收总额的不同切分。
-        # 标准=**all**：每个解析出的维度合计都要≈锚才过锚(正确率优先)。某维度串/漏行→它的合计
-        # 对不上→整体不过锚→送诊断,不再像旧的 any 那样被单个维度蒙混过关。空维度不算过。
         dim_sums = [s for s in (sum((r.get(spec.amount_key) or 0) for r in (rows or []))
                                 for rows in as_dims(value, spec).values()) if s]
-        anchored = bool(dim_sums) and all(abs(s - anchor) <= 0.03 * anchor for s in dim_sums)
-        total = max(dim_sums, key=lambda s: abs(s - anchor)) if dim_sums else None  # 展示:离锚最远的维度(决定成败)
+        anchored = bool(dim_sums) and all(_hit(s) for s in dim_sums)
+        total = max(dim_sums, key=lambda s: abs(s - anchor)) if dim_sums else None  # 展示:离锚最远的维度
     sig["anchored"] = anchored
     sig["confidence"] = "high" if anchored else "low"
     sig["anchor"] = anchor
+    if alt:
+        sig["main_anchor"] = alt          # 主营口径,传给复核让它口径一致(别把主营构成当不完整)
     sig["parsed_total"] = total
     return sig
 

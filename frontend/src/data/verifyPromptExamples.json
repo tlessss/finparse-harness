@@ -1,0 +1,65 @@
+{
+  "schema_version": "verify_rendered_examples_v1",
+  "agent_id": "verify",
+  "note": "完整渲染 prompt（无占位符），设计稿 v2，未接入生产 build_verify_messages",
+  "examples": [
+    {
+      "id": "TC-01",
+      "title": "营收 pass",
+      "scenario": "A 类四维完整、表对、逐项对",
+      "expected_verdict": "pass",
+      "expected_issue": null,
+      "pipeline": "commit",
+      "version": "v2-mock",
+      "source": "docs/mock-verify-prompt-v2.md §三-B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是 A 股年报「绿灯复核员」——解析结果已通过跨表锚(过锚)，你的职责是审查**锚证明不了的**盲区：\n表是否选对、维度是否齐全(含跨页续表)、逐项名称/金额/列是否取对。\n铁律：\n- 跨表锚只证明「已被解析出的维度金额合计≈权威锚」，不证明表身份正确、不证明维度齐全。\n- 确定性信号(下方「机器预检」)由系统算好；与之矛盾时以源文表格为准，但须写清 reason。\n- 体检(A/B/C 步)任一不过 → verdict=hold，可跳过逐项；宁可交人工，不放行错数。\n- 只依据源文真实文字；源文未写明的年份/期间绝不编造。\n- 只输出 JSON，不要解释性散文。"
+        },
+        {
+          "role": "user",
+          "content": "# ── 0. 案件元信息 ──\n字段：revenue_breakdown（营收，判据类 A）\n生产选中表：page=24 rows=18 cols=6 via=anchor amount_col=3 anchor_rel=0.012 dim_count=4 caption=营业收入构成(分行业)\n源文主依据类型：选中表网格\n【字段准则】按行业/产品/地区/销售模式披露营业收入构成；目标是占营业收入比重表，不是毛利率表或销售表。\n\n# ── 1. 机器预检（确定性，请先读再判）──\n【锚】权威营业收入 ≈ 1,234,567,890 元\n【各维度分项和】segments=1,234,567,890 | industries=1,234,567,890 | regions=1,234,567,890 | by_channel=1,234,567,890\n【缺失维度】无\n【维度完整性】完整（所有预期维度均过锚）\n【逐维对锚偏差】segments +0.0%(过锚) | industries +0.0%(过锚) | regions +0.0%(过锚) | by_channel +0.0%(过锚)\n【跨页可疑】未发现跨页信号\n\n【单位提示】源文金额单位为「元」；解析结果已为「元」。\n\n# ── 2. 源文表格 ──\n## 2a. 当前选中表（主对照）\n| 项目 | 本期金额 | 本期占比 |\n| 分行业 | | |\n| 集成电路 | 800,000,000 | 64.81% |\n| 其他 | 434,567,890 | 35.19% |\n| 合计 | 1,234,567,890 | 100.00% |\n\n## 2b. 紧接下一页同主题表（续表/跨页对照，可能为空）\n(无 — 下一页 caption=分地区销售情况，非构成续表)\n\n## 2c. 其它候选表摘要（认表对照，防选错表）\n#1 p24 营业收入构成(分行业) rows=18 ✔合计≈锚\n#2 p31 分地区销售情况 rows=12 ✘销售金额口径\n\n# ── 3. 待复核解析结果（JSON）\n{\n  \"segments\": [\n    {\"name\": \"芯片A\", \"revenue_yuan\": 620000000},\n    {\"name\": \"芯片B\", \"revenue_yuan\": 180000000}\n  ],\n  \"industries\": [\n    {\"name\": \"集成电路\", \"revenue_yuan\": 800000000},\n    {\"name\": \"其他\", \"revenue_yuan\": 434567890}\n  ],\n  \"regions\": [\n    {\"name\": \"境内\", \"revenue_yuan\": 1100000000},\n    {\"name\": \"境外\", \"revenue_yuan\": 134567890}\n  ],\n  \"by_channel\": [\n    {\"name\": \"直销\", \"revenue_yuan\": 900000000},\n    {\"name\": \"经销\", \"revenue_yuan\": 334567890}\n  ]\n}\n\n# ── 4. 复核步骤（严格顺序）──\n\n## Step A · 表身份（所有字段）\n对照 2a/2c，判断选中表是否为「营收」的**正确目标表**（非销售表/毛利率表/分部汇总/签约额表等）。\n认表 marker 参考：占营业收入比重, 营业收入比重, 占比\n- 若 2c 中明显有更符合 marker 且维度更全的表 → issue=wrong_table（reason 须写候选页码/标题差异）\n- 若通篇无目标表 → issue=wrong_table，reason=无构成表\n\n## Step B · 完整性与跨页（A 类 · 营收/成本构成）\n- 若「维度完整性=不完整」或「跨页可疑=是」：读 2b，看缺失/未过锚的分项是否在续表出现。\n  - 续表有、但未拼进 JSON → issue=incomplete_table（等同 cross_page，系统会交人工）\n  - 续表也无 → 仍 incomplete_table，reason 写缺哪一维\n- 若各维度过锚但仅「总额」与锚有小口径差(主营业务合计略小于营业收入) → caliber_gap，verdict=pass（附 note，不算数据错）\n\nStep A 或 B 不过 → verdict=hold，**不必**进入 Step C。\n\n## Step C · 逐项对照（仅 A/B 步都过）\n对 JSON 中**实际存在的**每一项，在 2a（必要时 2b）找同名/同行对照：\n\n### 列/期间规则（必守）\n- 表头多列并排时：优先对照**本期/报告期/期末**列；「上期/年初/上年」列不得当作本期值。\n- 未标明年份的两组数：称「左列/右列」或「第一组/第二组」，禁止编造「20XX年」。\n- 单位：解析值已统一为「元」；源文若为万元/千元须心算换算后再比，一致即对，issue 不得标 unit_error。\n\n### 名称规则\n- 「其中：XXX」子项不得与顶层分项重复计数 → issue=dup_count\n- 合计行/小计行不得进明细 → issue=extra_row\n- 名称串行/截断/错字 → issue=name_error\n\n### 金额规则\n- 取错列(上期/占比列/毛利率列) → issue=amount_error\n- 金额与源文差 > 1% 且非四舍五入 → issue=amount_error\n\n### 故意不核\n- **ratio_pct / 占比列**：解析结果可无占比（由金额/锚另算），源文有占比、JSON 无占比 → **不得**因此 hold。\n\n逐项均对 → verdict=pass。\n\n# ── 5. issue → 系统路由 ──\n| issue | 含义 | 系统后续 |\n| wrong_table | 选错表 | 选表自愈 agent |\n| incomplete_table / cross_page | 跨页未拼接或缺维 | 交人工 |\n| caliber_gap | 口径差，数据可接受 | pass（可备注） |\n| name_error / amount_error / dup_count / extra_row | 逐项错误 | hold → 人工或 L2 |\n| other | 其它 | hold |\n\n# ── 6. 输出 ──\n只输出 JSON：\n{\"verdict\":\"pass|hold|unknown\",\"suspects\":[{\"field\":\"...\",\"issue\":\"...\",\"reason\":\"...\"}],\"summary\":\"...\",\"confidence\":0.0~1.0}\nunknown 仅当源文完全无法对照时使用。"
+        }
+      ],
+      "expected_reply": {
+        "verdict": "pass",
+        "suspects": [],
+        "summary": "p24 为占营业收入比重的分行业构成表，四维度完整；逐项本期金额与源文一致。",
+        "confidence": 0.91
+      }
+    },
+    {
+      "id": "TC-02",
+      "title": "wrong_table",
+      "scenario": "选中表=分地区销售情况表",
+      "expected_verdict": "hold",
+      "expected_issue": "wrong_table",
+      "pipeline": "heal_select",
+      "version": "v2-mock",
+      "source": "docs/mock-verify-prompt-v2.md §三-B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是 A 股年报「绿灯复核员」——解析结果已通过跨表锚(过锚)，你的职责是审查**锚证明不了的**盲区：\n表是否选对、维度是否齐全(含跨页续表)、逐项名称/金额/列是否取对。\n铁律：\n- 跨表锚只证明「已被解析出的维度金额合计≈权威锚」，不证明表身份正确、不证明维度齐全。\n- 确定性信号(下方「机器预检」)由系统算好；与之矛盾时以源文表格为准，但须写清 reason。\n- 体检(A/B/C 步)任一不过 → verdict=hold，可跳过逐项；宁可交人工，不放行错数。\n- 只依据源文真实文字；源文未写明的年份/期间绝不编造。\n- 只输出 JSON，不要解释性散文。"
+        },
+        {
+          "role": "user",
+          "content": "# ── 0. 案件元信息 ──\n字段：revenue_breakdown（营收，判据类 A）\n生产选中表：page=31 rows=12 cols=5 via=keyword amount_col=2 anchor_rel=0.31 dim_count=1 caption=分地区销售情况\n源文主依据类型：选中表网格\n【字段准则】目标是占营业收入比重表，不是分区域销售情况/签约额表。\n\n# ── 1. 机器预检（确定性，请先读再判）──\n【锚】权威营业收入 ≈ 980,000,000 元\n【各维度分项和】regions=980,000,000\n【缺失维度】['segments', 'industries', 'by_channel']\n【维度完整性】不完整 — 缺失维度: ['segments', 'industries', 'by_channel']\n【逐维对锚偏差】regions +0.0%(过锚)\n【跨页可疑】未发现跨页信号\n\n# ── 2. 源文表格 ──\n## 2a. 当前选中表（主对照）\n| 地区 | 销售金额(本期) | 销售金额(上期) |\n| 华东 | 520,000,000 | 480,000,000 |\n| 华南 | 460,000,000 | 420,000,000 |\n| 合计 | 980,000,000 | 900,000,000 |\n\n## 2b. 紧接下一页同主题表（续表/跨页对照，可能为空）\n(无)\n\n## 2c. 其它候选表摘要（认表对照，防选错表）\n#1 p31 分地区销售情况 rows=12 ✘销售金额\n#2 p22 占营业收入比重(分产品) rows=20 ✔合计≈锚 marker=占营业收入比重\n\n# ── 3. 待复核解析结果（JSON）\n{\n  \"regions\": [\n    {\"name\": \"华东\", \"revenue_yuan\": 520000000},\n    {\"name\": \"华南\", \"revenue_yuan\": 460000000}\n  ]\n}\n\n# ── 4. 复核步骤（严格顺序）──\n\n## Step A · 表身份（所有字段）\n对照 2a/2c，判断选中表是否为「营收」的**正确目标表**（非销售表/毛利率表/分部汇总/签约额表等）。\n认表 marker 参考：占营业收入比重, 营业收入比重, 占比\n- 若 2c 中明显有更符合 marker 且维度更全的表 → issue=wrong_table（reason 须写候选页码/标题差异）\n- 若通篇无目标表 → issue=wrong_table，reason=无构成表\n\n## Step B · 完整性与跨页（A 类 · 营收/成本构成）\n- 若「维度完整性=不完整」或「跨页可疑=是」：读 2b，看缺失/未过锚的分项是否在续表出现。\n  - 续表有、但未拼进 JSON → issue=incomplete_table（等同 cross_page，系统会交人工）\n  - 续表也无 → 仍 incomplete_table，reason 写缺哪一维\n- 若各维度过锚但仅「总额」与锚有小口径差(主营业务合计略小于营业收入) → issue=caliber_gap，verdict=pass（附 note，不算数据错）\n\nStep A 或 B 不过 → verdict=hold，**不必**进入 Step C。\n\n## Step C · 逐项对照（仅 A/B 步都过）\n对 JSON 中**实际存在的**每一项，在 2a（必要时 2b）找同名/同行对照：\n\n### 列/期间规则（必守）\n- 表头多列并排时：优先对照**本期/报告期/期末**列；「上期/年初/上年」列不得当作本期值。\n- 未标明年份的两组数：称「左列/右列」或「第一组/第二组」，禁止编造「20XX年」。\n- 单位：解析值已统一为「元」；源文若为万元/千元须心算换算后再比，一致即对，issue 不得标 unit_error。\n\n### 名称规则\n- 「其中：XXX」子项不得与顶层分项重复计数 → issue=dup_count\n- 合计行/小计行不得进明细 → issue=extra_row\n- 名称串行/截断/错字 → issue=name_error\n\n### 金额规则\n- 取错列(上期/占比列/毛利率列) → issue=amount_error\n- 金额与源文差 > 1% 且非四舍五入 → issue=amount_error\n\n### 故意不核\n- **ratio_pct / 占比列**：解析结果可无占比（由金额/锚另算），源文有占比、JSON 无占比 → **不得**因此 hold。\n\n逐项均对 → verdict=pass。\n\n# ── 5. issue → 系统路由 ──\n| issue | 含义 | 系统后续 |\n| wrong_table | 选错表 | 选表自愈 agent |\n| incomplete_table / cross_page | 跨页未拼接或缺维 | 交人工 |\n| caliber_gap | 口径差，数据可接受 | pass（可备注） |\n| name_error / amount_error / dup_count / extra_row | 逐项错误 | hold → 人工或 L2 |\n| other | 其它 | hold |\n\n# ── 6. 输出 ──\n只输出 JSON：\n{\"verdict\":\"pass|hold|unknown\",\"suspects\":[{\"field\":\"...\",\"issue\":\"...\",\"reason\":\"...\"}],\"summary\":\"...\",\"confidence\":0.0~1.0}\nunknown 仅当源文完全无法对照时使用。"
+        }
+      ],
+      "expected_reply": {
+        "verdict": "hold",
+        "suspects": [
+          {
+            "field": "table",
+            "issue": "wrong_table",
+            "reason": "2a 为分地区销售情况(销售金额口径)，非占营业收入比重构成表；2c #2 p22 含 marker「占营业收入比重」且合计≈锚，应为目标表"
+          }
+        ],
+        "summary": "选错表：当前为销售情况表，应使用 p22 营业收入构成表。",
+        "confidence": 0.93
+      }
+    }
+  ]
+}

@@ -119,7 +119,7 @@ def _grid_to_text(table: list, max_rows: int = 45) -> str:
 
 
 def _source_grid(code: str, year: int, field: str) -> str:
-    """该字段选中表的二维网格 → 结构化表格文本。走 select_table(和解析同源的那张表)。"""
+    """该字段 select_table 选中表 → 结构化表格文本（可能与认证解析器实际用表不一致，仅作兜底）。"""
     try:
         from src.eval.table_cache import get_tables
         from src.parsers.infra.table_recall import select_table
@@ -130,6 +130,55 @@ def _source_grid(code: str, year: int, field: str) -> str:
         return _grid_to_text(sel.get("table")) if sel else ""
     except Exception:
         return ""
+
+
+def _source_meta_line(pick: Optional[Dict] = None, via: str = "") -> str:
+    """表出处一行：写进 source 正文，避免 grounding 里出现 LLM 会误当成表名的系统词。"""
+    parts = []
+    if pick and pick.get("page"):
+        parts.append(f"第{pick['page']}页")
+    if pick:
+        cap = (pick.get("caption") or "").strip()
+        if cap:
+            parts.append(f"表格标题「{cap}」")
+    if via:
+        parts.append(via)
+    if not parts:
+        return ""
+    return "【表出处】" + " · ".join(parts) + "（系统标注，不是表格内文字）\n"
+
+
+def _resolve_source_text(code: str, year: int, field: str, provenance: Dict = None,
+                         source_override: str = None) -> tuple:
+    """解析 verify/judge 应用哪张表当源文。优先：override → 溯源对齐表 → select_table → 抠图 → RAG。
+    返回 (source正文含表出处行, grounding)。grounding 只用稳定、不含内部术语的短标签。"""
+    if source_override:
+        return source_override, "选表自愈后重选表"
+    tables = None
+    try:
+        from src.eval.table_cache import get_tables
+        tables = get_tables(code, year)
+    except Exception:
+        pass
+    if provenance and tables:
+        from src.prompts.context.table import pick_table_from_provenance, grid_text_from_pick
+        pick = pick_table_from_provenance(provenance, tables)
+        if pick:
+            grid = grid_text_from_pick(pick)
+            if grid:
+                meta = _source_meta_line(pick, "与解析结果同源")
+                return meta + grid, "选中表网格"
+    source = _source_grid(code, year, field)
+    if source:
+        return source, "选中表网格"
+    if provenance:
+        clip = _source_from_provenance(code, year, provenance)
+        if clip:
+            return clip, "PDF溯源抠图"
+    rag = retrieve_source(code, year, field)
+    if rag:
+        return rag, "RAG检索片段"
+    return "", ""
 
 
 def _ensure_prov(field, code, year, field_value, provenance, spec):
@@ -148,11 +197,7 @@ def build_judge_messages(field: str, code: str, year: int, field_value,
     抽出来是为了：① judge_field 复用 ② 调试台先拿到可编辑的对话。
     unit_label: 源文金额单位(如'千元')。给 LLM 说明"解析值已换算为元",避免它把单位差误判 unit_error。"""
     prov = _ensure_prov(field, code, year, field_value, provenance, spec)
-    source, grounding = _source_grid(code, year, field), "选中表网格"           # 主:结构化表格,行列清晰
-    if not source:
-        source, grounding = _source_from_provenance(code, year, prov), "溯源原表"   # 退:抠图碎文本
-    if not source:
-        source, grounding = retrieve_source(code, year, field), "RAG检索"
+    source, grounding = _resolve_source_text(code, year, field, prov)
     if not source:
         return None, grounding
     unit_note = ""
@@ -196,43 +241,82 @@ def judge_field(field: str, code: str, year: int, field_value,
 # 过这个 agent，它点头(pass)才算真过。跨表锚只证明了"表选对 + 至少一维金额合计≈营业收入"，
 # 对"其他维度完整性 / 摘行质量 / '其中'重复计数 / 名称脏 / 占比合理"零覆盖，正是这里要审的。
 
+def _field_prompt_notes(field: str, spec=None) -> str:
+    """字段准则注入 verify/judge prompt，减少 LLM 对表形态的误判。"""
+    from src.eval.field_spec import get_spec
+    sp = spec or get_spec(field)
+    lines = []
+    if sp.spec_note:
+        lines.append(f"【字段准则】{sp.spec_note}")
+    if field == "revenue_breakdown" and sp.categories:
+        cats = "、".join(sp.categories)
+        lines.append(
+            f"【表形态】营收构成表**常见**在同一张表里依次列出 {cats} 四段维度标记——"
+            f"这是正常形态，**不得**因「一张表里有多个维度段」就判 wrong_table。"
+        )
+        markers = "、".join(sp.table_markers) if sp.table_markers else "占营业收入比重"
+        lines.append(f"【认表 marker】{markers}")
+        lines.append(
+            "【wrong_table 指】表头主列是营业成本/毛利率/销售情况/签约额等，或整表口径不是营业收入构成——"
+            "不是「维度段超过一个」。"
+        )
+    return ("\n" + "\n".join(lines) + "\n") if lines else ""
+
+
 def build_verify_messages(field: str, code: str, year: int, field_value, sig: Dict,
-                          provenance: Dict = None, spec=None, unit_label: str = None):
+                          provenance: Dict = None, spec=None, unit_label: str = None,
+                          source_override: str = None, extra_note: str = None):
     """构造发给复核 agent 的 messages。返回 (messages|None, grounding)。
-    sig: 该字段的 field_plausibility 信号（带 anchor / parsed_total，用来告诉 agent 锚证明了什么）。"""
+    sig: 该字段的 field_plausibility 信号（带 anchor / parsed_total，用来告诉 agent 锚证明了什么）。
+    source_override: 选表自愈后传入"纠正后那张表"的网格文本，绕过 _source_grid(否则会重挑回错表)。
+    extra_note: 追加提示（如选表自愈后"表已确认、只核数据"的信任提示）。"""
     prov = _ensure_prov(field, code, year, field_value, provenance, spec)
-    source, grounding = _source_grid(code, year, field), "选中表网格"           # 主:结构化表格,行列清晰
-    if not source:
-        source, grounding = _source_from_provenance(code, year, prov), "溯源原表"   # 退:抠图碎文本
-    if not source:
-        source, grounding = retrieve_source(code, year, field), "RAG检索"
+    if source_override:
+        source, grounding = source_override, "选表自愈表"
+    else:
+        source, grounding = _resolve_source_text(code, year, field, prov)
     if not source:
         return None, grounding
     anchor = (sig or {}).get("anchor")
+    main_anchor = (sig or {}).get("main_anchor")
     anchor_note = ""
     if anchor:
         anchor_note = (f"\n【锚参考】权威营业收入≈{anchor:,.0f} 元。跨表锚只证明“**被解析出的那些维度**金额合计≈营收”，"
                        f"**不证明表身份对、也不证明维度齐全**——请照第一步 A/B 做体检；被解析维度的总额不必再校。\n")
+        if main_anchor:
+            anchor_note += (f"【主营口径】主营业务收入≈{main_anchor:,.0f} 元(= 营业收入 − 其他业务收入)。会计准则里维度构成表"
+                            f"披露的是**主营业务**分行业/产品/地区,所以**分项和≈主营(而非≈营收)是完整的正确形态**——差的那块"
+                            f"是其他业务收入,准则允许不按维度拆。**分项和≈主营时不要判 cross_page/不完整**;只有连主营都明显对不上、"
+                            f"或某分项行明显缺失(如源文有 X 行而解析漏了),才算截断/漏行。\n")
     unit_note = ""
     if unit_label:
         unit_note = (f"\n【单位提示】源文金额单位为「{unit_label}」；解析结果已换算为「元」，"
                      f"对照前先换算，别因单位不同误判。\n")
+    if extra_note:
+        unit_note += extra_note
+    from src.eval.field_spec import get_spec
+    sp = spec or get_spec(field)
     built = build_messages("verify", {
         "grounding": grounding, "source": source, "anchor_note": anchor_note, "unit_note": unit_note,
-        "field": field, "field_value_json": json.dumps(field_value, ensure_ascii=False, indent=2),
+        "field": field, "field_label": sp.label or field, "field_spec_note": _field_prompt_notes(field, sp),
+        "field_value_json": json.dumps(field_value, ensure_ascii=False, indent=2),
     })
     return built["messages"], grounding
 
 
 def verify_field(field: str, code: str, year: int, field_value, sig: Dict = None,
-                 provenance: Dict = None, spec=None, debug: bool = False, unit_label: str = None) -> Dict:
+                 provenance: Dict = None, spec=None, debug: bool = False, unit_label: str = None,
+                 source_override: str = None, extra_note: str = None) -> Dict:
     """复核 agent：对**锚已过的绿灯**逐字段复核锚的盲区。pass=真可信→可入库；hold=有疑点→送人审。
-    无源文可对照时判 unknown（既不放行也不拦，交回人工），不因缺证据误杀绿灯。"""
-    messages, grounding = build_verify_messages(field, code, year, field_value, sig, provenance, spec, unit_label)
+    无源文可对照时判 unknown（既不放行也不拦，交回人工），不因缺证据误杀绿灯。
+    source_override: 选表自愈后拿"纠正后那张表"当源文；extra_note: 追加信任提示。"""
+    messages, grounding = build_verify_messages(field, code, year, field_value, sig, provenance, spec,
+                                                unit_label, source_override=source_override,
+                                                extra_note=extra_note)
     if messages is None:
         return {"verdict": "unknown", "suspects": [], "field": field,
                 "summary": "溯源+RAG均无源文，无法复核", "_system": _sys_text("verify") if debug else None}
-    raw = chat(messages, role="judge", temperature=0.1, model=resolve_model("verify"))
+    raw = chat(messages, role="judge", temperature=0, model=resolve_model("verify"))   # 复核要可复现,temp=0
     v = _extract_json(raw)
     # 复核 agent 的裁决字段是 verdict=pass|hold；_extract_json 失败会给 verdict=unknown，透传即可
     v.setdefault("suspects", v.get("issues", []))

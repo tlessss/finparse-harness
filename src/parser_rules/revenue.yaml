@@ -1,33 +1,10 @@
-# 营收解析规则（规范驱动）— 对应 docs/新版解析技术路线.md M1
+# 营收解析规则 — 精简版（只保留解析器代码真正读取的：认列 / 表类型 / 切桶）
 # 依据准则第2号第二十五条：按 行业/产品/地区/销售模式 披露营业收入构成。
-# 这份规则同时是优化 Agent (Phase 2.0) 的可调旋钮面。
+# 说明：sections.anchors / find_page / exclude_rows / validate / forbid_as_ratio 已删除——
+#       选表已交给 向量召回+锚精判+选表agent，占比不再解析(下游用 金额/锚 算)，这些旋钮无人读取。
 
 revenue_breakdown:
-  # ① 章节锚点（候选表应在 MD&A "收入与成本" 小节附近）
-  sections:
-    anchors: ["管理层讨论与分析", "经营情况讨论与分析", "收入与成本", "主要经营情况", "主营业务分析"]
-
-  # ① 找页打分配置（替代模糊关键词 + [:15] 盲截断）
-  find_page:
-    strong: ["占营业收入比重", "营业收入构成", "主营业务分行业", "主营业务分产品",
-             "分产品", "分行业", "分地区", "分销售模式"]   # 高信号词
-    weak:   ["营业收入", "主营业务", "经营情况", "收入与成本"]  # 低信号词（噪声）
-    prefer_section: management                              # MD&A 章节加成
-    min_page: 6                                            # 跳过封面/目录（软下限）
-    top_n: 12                                              # 按分数取前 N 页（非按页码）
-    window: 1                                              # 命中页 ±1 覆盖续表
-
-  # ② 表语义分类：区分 (A) 占比构成表 与 (B) 收入/成本/毛利率表
-  table_types:
-    composition:                       # (A) 我们要的：含"占营业收入比重"
-      require_any_header: ["占营业收入比重", "营业收入比重", "占营业收入的比重", "占比"]
-      validate: ratio_sum_100
-    margin:                            # (B) 避坑：只有毛利率、没有占比
-      require_any_header: ["毛利率"]
-      forbid_as_ratio: ["毛利率", "毛利率比上年", "毛利率比上年同期"]
-      validate: revenue_le_total
-
-  # ③ 表头驱动认列：表头文字 → 语义列（别名）
+  # ① 表头驱动认列：表头文字 → 语义列（别名）。_resolve_columns 读取。
   header_aliases:
     name:    ["项目", "分行业", "分产品", "分地区", "分销售模式", "营业收入构成"]
     revenue: ["营业收入", "金额", "收入"]
@@ -35,7 +12,14 @@ revenue_breakdown:
     cost:    ["营业成本"]
     gross:   ["毛利率"]
 
-  # ④ 维度锚点（切桶标记 → 维度）。这是自愈"改规则"的主要旋钮：
+  # ② 表语义分类：区分 (A) 占比构成表 与 (B) 毛利率表。header_columns.py 只读 require_any_header。
+  table_types:
+    composition:                       # (A) 我们要的：含"占营业收入比重"
+      require_any_header: ["占营业收入比重", "营业收入比重", "占营业收入的比重", "占比"]
+    margin:                            # (B) 避坑：只有毛利率、没有占比
+      require_any_header: ["毛利率"]
+
+  # ③ 维度锚点（切桶标记 → 维度）。自愈"改规则"的主要旋钮：
   #    加一种报告写法,往这里加一条即可(parser 直接读 YAML,无需改代码)。
   #    坑:有的报告写"销售模式"(无"分"),漏了会让 直销/经销 串进上一桶(regions翻倍,赛力斯601127踩过)。
   dimensions:
@@ -51,6 +35,3 @@ revenue_breakdown:
     按销售模式: by_channel
     销售渠道: by_channel
     按销售渠道: by_channel
-
-  # ⑤ 需剔除的行（合计/小计混入会让占比之和翻倍）
-  exclude_rows: ["合计", "小计", "总计", "其中"]

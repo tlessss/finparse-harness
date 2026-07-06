@@ -1,0 +1,13 @@
+id: rev_zhuying_prefix
+field: revenue
+note: 切桶标记带"主营业务"前缀(主营业务分行业/分产品/分地区/分销售模式)。base 的切桶是精确匹配,漏了这种写法→全部堆进一个桶导致过计。苏宁002024等踩过。
+delta:
+  revenue_breakdown:
+    dimensions:
+      主营业务分行业: industries
+      主营业务分产品: segments
+      主营业务分地区: regions
+      主营业务分销售模式: by_channel
+      主营业务分销售渠道: by_channel
+      主营业务分产品或服务: segments
+      主营业务分类: segments

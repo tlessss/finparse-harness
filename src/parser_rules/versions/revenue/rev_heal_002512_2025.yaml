@@ -1,0 +1,9 @@
+id: rev_heal_002512_2025
+field: revenue
+note: 新增分隔行标记「按经营地区分类」→ regions，将境内/境外销售从segments桶分离到regions桶，避免重复计数
+delta:
+  revenue_breakdown:
+    dimensions:
+      按经营地区分类: regions
+meta:
+  origin: '002512_2025'

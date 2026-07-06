@@ -1,0 +1,9 @@
+id: rev_heal_000977_2025
+field: revenue
+note: 新增分隔行标记'按销售渠道分类'，将区域和行业正确归入by_channel桶，避免与segments桶混淆
+delta:
+  revenue_breakdown:
+    dimensions:
+      按销售渠道分类: by_channel
+meta:
+  origin: 000977_2025

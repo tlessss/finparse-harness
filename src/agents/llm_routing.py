@@ -11,7 +11,7 @@ from typing import Dict, Optional
 from src.config import Config
 
 # 管理页会列出的全部 agent（模板型 5 个 + 无模板的 codegen）。
-AGENT_IDS = ["judge", "verify", "extract_judge", "auto_heal", "diagnose", "codegen"]
+AGENT_IDS = ["judge", "verify", "extract_judge", "auto_heal", "diagnose", "codegen", "select_table", "rule_heal"]
 
 _cache: Optional[Dict[str, str]] = None
 

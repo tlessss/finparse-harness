@@ -1,0 +1,13 @@
+id: rev_fenlei_dividers
+field: revenue
+note: 分隔行带"分类"后缀或用"业务类型"当维度标题(按销售渠道分类/按经营地区分类/业务类型)。base 切桶精确匹配漏了这些写法→堆桶过计。浪潮000977等踩过。
+delta:
+  revenue_breakdown:
+    dimensions:
+      业务类型: segments
+      按产品类别: segments
+      按经营地区分类: regions
+      按地区分类: regions
+      按销售渠道分类: by_channel
+      按销售模式分类: by_channel
+      按客户类型分类: by_channel

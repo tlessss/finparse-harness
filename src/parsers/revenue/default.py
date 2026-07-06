@@ -21,11 +21,6 @@ class RevenueParser(BaseParser):
     def __init__(self, rule: Dict = None):
         super().__init__(rule or {})
 
-    def _extra_exclude(self) -> set:
-        """优化 Agent 可通过 rule['revenue_section']['extra_exclude_names'] 注入额外排除项。"""
-        sec = (self.rule or {}).get("revenue_section", {}) or {}
-        return set(sec.get("extra_exclude_names", []) or [])
-
     # 代码兜底的切桶标记（YAML 缺失/读不到时用）。正常以 revenue.yaml 的 dimensions 为准。
     _FALLBACK_DIMENSIONS = {
         "分行业": "industries", "按行业": "industries",
@@ -93,15 +88,16 @@ class RevenueParser(BaseParser):
         return None
 
     def parse(self, pdf_path: str = None, pre_scan: list = None,
-              code: str = None, year: int = None) -> Dict:
+              code: str = None, year: int = None, forced_sel: dict = None) -> Dict:
         """营收解析 = 选表解耦 + 认列切桶。
         选表逻辑不再内嵌本解析器：全权委托 select_table（① 向量召回 → ② 锚精判定表定金额列 →
         ③ 维度数闸）。本解析器只负责"给定选中表 → 结构化"（认列、切桶、溯源）。
-        code/year 用于取锚做精判；缺省时 select_table 优雅退回纯语义召回（recall_only）。"""
-        if not pre_scan:
+        code/year 用于取锚做精判；缺省时 select_table 优雅退回纯语义召回（recall_only）。
+        forced_sel: 选表自愈用——外部(LLM选表 agent)指定一张选中表，绕过 select_table 直接解析它。"""
+        if not pre_scan and not forced_sel:
             return {"revenue_breakdown": None, "status": "no_table_found"}
 
-        sel = select_table(pre_scan, code, year, "revenue")
+        sel = forced_sel or select_table(pre_scan, code, year, "revenue")
         if not sel or not sel.get("table"):
             return {"revenue_breakdown": None, "status": "no_table_found"}
 
@@ -243,16 +239,15 @@ class RevenueParser(BaseParser):
                 continue
             if name.startswith("其中"):       # "其中：X" 是上一项的子拆分,不计入顶层(否则重复计数)
                 continue
-            # 可配置排除项（供优化 Agent 在沙箱中调参；默认空）
-            if name.strip() in self._extra_exclude():
-                continue
 
             amount = self._parse_number(amount_raw) if amount_raw else None
             if amount is None:                   # 只收有金额的项(占比不再解析,下游用 金额/锚 算)
                 continue
 
             item = {
-                "name": name.split("  ")[0].strip()[:30],
+                # 名称上限从 30 → 120:营收分项名常带括号列举(如"…产品(含CMP抛光垫、CMP抛光液、…)"),
+                # 30 字会把长产品名截断 → 复核判 name_error(鼎龙股份300054)。120 足够容真名、又能挡住抽碎的整段。
+                "name": name.split("  ")[0].strip()[:120],
                 "revenue_yuan": convert_to_yuan(amount, unit_ratio),
             }
             if name not in seen.get(current, set()):

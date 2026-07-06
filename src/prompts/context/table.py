@@ -106,7 +106,7 @@ def candidate_table_lines(tables: List[Dict], code: str, year: int, sig: str, to
 
 
 def selected_table_grid(code: str, year: int, field_sig: str, max_rows: int = 45) -> str:
-    """生产链路选中表 → 结构化网格文本（供 judge/verify 复用）。"""
+    """生产链路 select_table → 结构化网格文本（供 judge/verify 复用）。"""
     try:
         from src.eval.table_cache import get_tables
         from src.parsers.infra.table_recall import select_table
@@ -119,3 +119,72 @@ def selected_table_grid(code: str, year: int, field_sig: str, max_rows: int = 45
         return table_preview(sel["table"], max_rows=max_rows, max_cols=20)
     except Exception:
         return ""
+
+
+def _bbox_overlap(a, b, tol: float = 3.0) -> bool:
+    """两矩形是否相交（溯源 cell bbox vs 表网格 cell bbox）。"""
+    if not a or not b or len(a) < 4 or len(b) < 4:
+        return False
+    ax0, ay0, ax1, ay1 = float(a[0]), float(a[1]), float(a[2]), float(a[3])
+    bx0, by0, bx1, by1 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+    return not (ax1 < bx0 - tol or bx1 < ax0 - tol or ay1 < by0 - tol or by1 < ay0 - tol)
+
+
+def pick_table_from_provenance(prov: Dict, tables: List[Dict]) -> Optional[Dict]:
+    """按溯源 bbox 反查解析值实际出自哪张表。
+
+    verify/judge 不能重跑 select_table 当源文——认证解析器与 select_table 可能选不同表
+    （例：000785 毛利率表 vs 占营业收入比重表）。以溯源为准。
+    """
+    if not prov or not tables:
+        return None
+    scores: Dict[int, int] = {}
+    by_id: Dict[int, Dict] = {}
+    for v in prov.values():
+        if not isinstance(v, dict):
+            continue
+        page, pb = v.get("page"), v.get("bbox")
+        if not page:
+            continue
+        for t in tables:
+            if t.get("page") != page:
+                continue
+            tid = id(t.get("table"))
+            by_id.setdefault(tid, t)
+            scored = False
+            if pb and t.get("cell_bbox"):
+                grid_bb = t.get("cell_bbox") or []
+                for row_bb in grid_bb:
+                    for cb in (row_bb or []):
+                        if cb and _bbox_overlap(pb, cb):
+                            scores[tid] = scores.get(tid, 0) + 3
+                            scored = True
+                            break
+                    if scored:
+                        break
+                if not scored and t.get("table_bbox") and _bbox_overlap(pb, t.get("table_bbox")):
+                    scores[tid] = scores.get(tid, 0) + 2
+                    scored = True
+            if not scored:
+                scores[tid] = scores.get(tid, 0) + 1
+    if not scores:
+        return None
+    best_id = max(scores, key=lambda k: scores[k])
+    return by_id.get(best_id)
+
+
+def grid_text_from_pick(pick: Optional[Dict], max_rows: int = 45) -> str:
+    """选中表对象 → markdown 管道表格（与 verify prompt 一致）。"""
+    table = (pick or {}).get("table") or []
+    rows = [[(c or "").replace("\n", "").strip() for c in row] for row in table[:max_rows]]
+    nc = max((len(r) for r in rows), default=0)
+    if not nc:
+        return ""
+    rows = [r + [""] * (nc - len(r)) for r in rows]
+    keep = [ci for ci in range(nc) if any(rows[ri][ci] for ri in range(len(rows)))]
+    lines = []
+    for r in rows:
+        cells = [r[ci] for ci in keep]
+        if any(cells):
+            lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)

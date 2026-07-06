@@ -116,6 +116,56 @@ def _best_col_vs_anchor(table: List[list], anchor: float):
     return best_col, best_rel
 
 
+def _ncols(g) -> int:
+    return max((len(r) for r in (g or [])), default=0)
+
+
+def following_tables(all_tables: List[Dict], chosen: Dict, k: int = 2,
+                     gap_intra: float = 180, top_margin: float = 150) -> List[Dict]:
+    """chosen 之后**物理紧邻**的表(下一页顶部 / 同页正下方),放宽列数匹配(±2)——
+    这是跨页续表的候选。比 scan 的 _stitch_cross_page 更宽松:列数不必精确相等、位置阈值更松,
+    因为下游用"合并后是否过锚"这道闸兜底(合并不过锚就不采纳),不怕误召。返回按阅读序的前 k 张。"""
+    cg, cp = chosen.get("table_bbox"), chosen.get("page")
+    if not cg or cp is None:
+        return []
+    c_bottom = chosen.get("_tail_bottom") or cg[3]
+    c_page = chosen.get("_tail_page", cp)
+    c_ncols = _ncols(chosen.get("table"))
+    cands = []
+    for t in all_tables:
+        if t is chosen:
+            continue
+        bb, tp = t.get("table_bbox"), t.get("page")
+        if not bb or tp is None:
+            continue
+        b_top = bb[1]
+        adj = (tp == c_page and 0 <= b_top - c_bottom < gap_intra) or \
+              (tp == c_page + 1 and b_top <= top_margin)
+        if not adj or abs(_ncols(t.get("table")) - c_ncols) > 2:
+            continue
+        cands.append((tp, b_top, t))
+    cands.sort(key=lambda x: (x[0], x[1]))
+    return [t for _, _, t in cands[:k]]
+
+
+def merge_tables(a: Dict, b: Dict) -> Dict:
+    """把 b 的数据行并进 a(重复表头则跳掉),返回**新** dict(不改原表)。用于跨页续表拼接。"""
+    from src.parsers.infra.table_scanner import _row_key
+    ta, tb = list(a.get("table") or []), list(b.get("table") or [])
+    ba = list(a.get("cell_bbox") or [])
+    bb = list(b.get("cell_bbox") or [])
+    if tb and ta and _row_key(tb[0]) == _row_key(ta[0]):
+        tb = tb[1:]
+        bb = bb[1:] if bb else bb
+    merged = {**a, "table": ta + tb}
+    if ba and bb:
+        merged["cell_bbox"] = ba + bb
+    merged["text"] = (a.get("text") or "") + " " + " ".join(
+        c.replace("\n", " ") for row in tb for c in row if c)
+    merged["_stitched_from"] = (a.get("page"), b.get("page"))
+    return merged
+
+
 def anchor_select(tables: List[Dict], code: str, year: int,
                   field: str = "revenue", tol: float = 0.03) -> List[Dict]:
     """锚精判:召回候选里,哪张表的哪列数字能解释锚(营业收入/成本) → 定表+定金额列。
@@ -157,6 +207,18 @@ def _dimension_count(table: List[list]) -> int:
     return len(found)
 
 
+def _is_ten_pct_trap(item: Dict) -> bool:
+    """MD&A「占公司营业收入或营业利润 10%以上的行业/产品/地区/销售模式的情况」筛选表——
+    只列 >10% 的大项、把小项打包进"其他",**不完整**,别拿它当营收构成表。
+    识别:① 标题含"10%以上";② 表头同时有"毛利率"列和"比上年/同比"列(MD&A 经营情况表签名)。"""
+    cap = item.get("caption") or ""
+    if "10%以上" in cap:
+        return True
+    g = item.get("table") or []
+    hdr = " ".join((c or "") for row in g[:4] for c in row)
+    return "毛利率" in hdr and ("比上年" in hdr or "同比" in hdr)
+
+
 def select_table(tables: List[Dict], code: str, year: int,
                  field: str = "revenue", tol: float = 0.03):
     """选表解耦全流程:① 向量召回候选 → ② 锚精判定表定列（营收/成本再按"覆盖维度数"闸,区分构成表 vs 附注单一分类表）。
@@ -171,7 +233,14 @@ def select_table(tables: List[Dict], code: str, year: int,
     if field in ("revenue", "cost"):
         for c in judged:
             c["dim_count"] = _dimension_count(c.get("table"))
-        # 候选池:对锚够近(放宽到5%容口径差) → 里面选"覆盖维度最多"的,平票取对锚最近
+            c["_trap"] = _is_ten_pct_trap(c)
+        # ① 优先在**非坑表**里选:只要有过锚(≤5%容口径差)的非坑表,就在其中选(覆盖维度最多,平票取对锚最近)。
+        #    这样即便真·附注构成表只有单维(如"营业收入分解信息"),也能压过多维的"10%以上"筛选表。
+        non_trap = [c for c in judged if not c["_trap"] and c["anchor_rel"] <= 0.05]
+        if non_trap:
+            non_trap.sort(key=lambda c: (-c["dim_count"], c["anchor_rel"]))
+            return {**non_trap[0], "via": "recall+anchor+dims(避10%以上坑)"}
+        # ② 没有过锚的非坑表 → 退回原逻辑(可能只能用坑表,交给复核/自愈兜底)
         pool = [c for c in judged if c["anchor_rel"] <= 0.05 and c["dim_count"] >= 1] or judged
         pool.sort(key=lambda c: (-c["dim_count"], c["anchor_rel"]))
         return {**pool[0], "via": "recall+anchor+dims"}
