@@ -2,9 +2,11 @@
 
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "."))
+_LEGACY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _LEGACY)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "."))
 
-from src.agents.sandbox import fix_outcome, run_sandbox
+from sandbox import fix_outcome, run_sandbox
 
 
 def H(passed, red, fields=None):

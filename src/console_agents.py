@@ -1,7 +1,7 @@
 """Agent 管理页后端 — agent 清单/详情/存模板/模型路由。
 
-数据源：模板型 agent = src/prompts/templates/*.yaml（可看/编辑/配模型/部分可试跑）；
-        无模板 agent（codegen）= 内联 prompt，只可看/配模型。
+数据源：模板型 agent = src/prompts/templates/*.yaml（可看/编辑/配模型/部分可试跑）。
+        codegen 已抽进 templates/codegen.yaml（不再是无模板内联 agent）。
 """
 
 from typing import Any, Dict, Optional
@@ -10,11 +10,8 @@ from src.config import Config
 from src.prompts.registry import list_agents, list_template_ids, load_template, save_template
 from src.agents.llm_routing import AGENT_IDS, resolve_model, routing_matrix, save_routing
 
-# 无模板 agent（prompt 内联在代码里，暂不支持在线编辑）
-_INLINE: Dict[str, Dict[str, str]] = {
-    "codegen": {"role": "codegen",
-                "note": "prompt 内联于 src/agents/code_generator.py，暂不支持在线编辑"},
-}
+# 无模板 agent（prompt 仍内联在代码、暂不支持在线编辑）——codegen 已迁入模板,此处清空
+_INLINE: Dict[str, Dict[str, str]] = {}
 # agent_id → 现有 debug 试跑端点前缀（/debug/{prefix}/prepare|chat）
 _PLAYGROUND: Dict[str, str] = {"judge": "judge", "verify": "verify", "diagnose": "heal"}
 

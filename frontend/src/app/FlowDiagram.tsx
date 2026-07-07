@@ -1,10 +1,8 @@
 "use client";
 
-/* FinParseAI 全流程图（React Flow）
- *
- * 状态以【代码实情】为准（不是架构文档、也不是旧表格）：
- *   实线节点 = ✅ 已接入 workflow.py 的状态机（parse_pdf→validate→db_write→report）
- *   虚线节点 = 代码已写，但没 add_node 进 workflow（迭代/决策/复核当前没在主流程里跑）
+/* FinParseAI 全流程图（React Flow）— **历史架构图，已过时**。
+ * 权威生产流程图：/console/flow（PipelineFlow.tsx，对齐 pipeline.run_field）。
+ * workflow.py / page_locator 等已迁入 archive/。
  */
 import { useState } from "react";
 import {
@@ -121,6 +119,12 @@ export default function FlowDiagram() {
   const [sel, setSel] = useState<NodeDef | null>(null);
 
   return (
+    <div className="flex flex-col gap-3">
+      <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        此图为<strong>早期 LangGraph / workflow</strong>架构，已与当前生产主链不一致。
+        请看权威流程图：<a href="/console/flow" className="underline font-medium">控制台 → Pipeline 流程图</a>
+        （<code className="text-xs">pipeline.run_field</code> + L1/L2/L3 自愈）。
+      </div>
     <div className="flex gap-4">
       <div style={{ height: 640 }} className="flex-1 border rounded-xl bg-gray-50">
         <ReactFlow
@@ -158,6 +162,7 @@ export default function FlowDiagram() {
           </div>
         )}
       </aside>
+    </div>
     </div>
   );
 }

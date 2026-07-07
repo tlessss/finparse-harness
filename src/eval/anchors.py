@@ -120,17 +120,54 @@ def _derive_main_business(code: str, year: int, revenue: float) -> Optional[floa
     return None
 
 
+def derive_anchor_from_income_statement(code: str, year: int) -> Dict[str, float]:
+    """取锚自愈:从 PDF 已扫表里的合并利润表抠营收/成本(无 DB 锚时用)。
+    与 get_anchors 内兜底同源,供路由器/healer 在显式「再试一次」时调用。"""
+    return _from_tables(code, year)
+
+
+def _merge_anchors(a: Dict[str, float], code: str, year: int) -> Dict[str, float]:
+    """DB 有行但缺 revenue 等键时,用利润表补洞(避免 `{} or tables` 因 cost 存在而跳过兜底)。"""
+    out = dict(a)
+    if all(out.get(k) for k in _KEYS):
+        return out
+    derived = _from_tables(code, year)
+    for k in _KEYS:
+        if not out.get(k) and derived.get(k):
+            out[k] = derived[k]
+    return out
+
+
+def _attach_main_revenue(a: Dict[str, float], code: str, year: int) -> Dict[str, float]:
+    if a.get("revenue"):
+        mb = _derive_main_business(code, year, a["revenue"])
+        if mb and mb < a["revenue"]:
+            a["main_revenue"] = mb
+    return a
+
+
+def heal_anchors(code: str, year: int) -> Dict[str, float]:
+    """取锚自愈:清缓存后强制走利润表兜底,合并进锚 dict 并写回缓存。"""
+    ck = f"{code}_{year}"
+    _CACHE.pop(ck, None)
+    base = _from_db(code, year) or {}
+    a = _merge_anchors(base, code, year)
+    if not a.get("revenue"):
+        a = {**a, **derive_anchor_from_income_statement(code, year)}
+    a = _attach_main_revenue(a, code, year)
+    if a:
+        _CACHE[ck] = a
+    return a
+
+
 def get_anchors(code: str, year: int) -> Dict[str, float]:
     """返回 {revenue, cost, rnd_expense, [main_revenue]}（抽不到的键缺省）。DB 为主、利润表兜底，缓存。
     main_revenue = 主营业务收入,金额锚的第二口径(见 _derive_main_business)。"""
     ck = f"{code}_{year}"
     if ck in _CACHE:
         return _CACHE[ck]
-    a = dict(_from_db(code, year) or _from_tables(code, year))
-    if a.get("revenue"):
-        mb = _derive_main_business(code, year, a["revenue"])
-        if mb and mb < a["revenue"]:                     # 主营应 ≤ 营收
-            a["main_revenue"] = mb
+    a = _merge_anchors(_from_db(code, year) or {}, code, year)
+    a = _attach_main_revenue(a, code, year)
     _CACHE[ck] = a
     return a
 

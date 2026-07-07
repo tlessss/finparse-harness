@@ -8,8 +8,9 @@
   ① 拿"选对的那张表" + base 解它的逐维对锚偏差 + 当前 dimensions/aliases 喂给 LLM；
   ② LLM 提最小 delta(只加不删)；
   ③ base+delta 合并 → 在同一张表上 forced 重解 → 过锚?
-  ④ 过锚才算修好；由上游走复核，pass 再 save_version 把这条规则固化进池([[rule-versions]])。
-本 agent 只负责「提 delta + 验证过锚」，不入库、不落盘（那是上游复核后的事）。
+  ④ 不过锚可迭代 K 轮(回喂上一轮 delta 与偏差)；
+  ⑤ 过锚才算修好；由上游走复核，pass 再 save_version 固化进池。
+本 agent 只负责「提 delta + 验证过锚」，不入库、不落盘（那是上游复核后的事)。
 """
 
 from typing import Dict, List, Optional
@@ -30,6 +31,8 @@ _RULE_FILE = {"revenue_breakdown": "revenue", "cost_breakdown": "cost"}
 _RULE_KEY = {"revenue_breakdown": "revenue_breakdown", "cost_breakdown": "cost_breakdown"}
 _ALLOWED_DIMS = {"industries", "segments", "regions", "by_channel"}
 _ALLOWED_ROLES = {"name", "revenue", "ratio", "cost", "gross"}
+_UNIT_OVERRIDES = {1, 1000, 10000, 100000000}
+_MAX_ROUNDS = 2
 
 
 def _pdf(code, year):
@@ -77,7 +80,7 @@ def _reparse_under(code, year, field, chosen, rule) -> Optional[dict]:
 
 
 def _sanitize_delta(delta: dict) -> dict:
-    """只放行 dimensions(值∈四桶) 与 header_aliases(角色合法、值是字符串列表)，其余丢弃。防 LLM 乱加键。"""
+    """只放行 dimensions / header_aliases / unit_ratio_override，其余丢弃。"""
     out = {}
     dims = (delta or {}).get("dimensions") or {}
     clean_dims = {str(k): v for k, v in dims.items()
@@ -93,65 +96,135 @@ def _sanitize_delta(delta: dict) -> dict:
                 clean_al[role] = strs
     if clean_al:
         out["header_aliases"] = clean_al
+    uo = (delta or {}).get("unit_ratio_override")
+    try:
+        uo = int(uo)
+    except (TypeError, ValueError):
+        uo = None
+    if uo in _UNIT_OVERRIDES:
+        out["unit_ratio_override"] = uo
     return out
 
 
+def _section_view(rule: dict, rule_key: str) -> dict:
+    sec = (rule.get(rule_key) or {})
+    return {
+        "dimensions": dict(sec.get("dimensions") or {}),
+        "header_aliases": {k: list(v) for k, v in (sec.get("header_aliases") or {}).items()},
+        "unit_ratio_override": sec.get("unit_ratio_override"),
+    }
+
+
+def _prior_block(round_i: int, prior_delta: dict, prior_diff: str) -> str:
+    if round_i <= 1 or not prior_delta:
+        return ""
+    return (f"# 上一轮已加增量（请在此基础上继续加，勿重复）\n{_json(prior_delta)}\n"
+            f"上一轮后逐维偏差：\n{prior_diff}\n")
+
+
 def rule_heal(code: str, year: int, field: str, chosen: dict,
-              debug: bool = False) -> Dict:
-    """选对表但 base 解错 → LLM 提规则 delta → 合并重解 → 过锚?。
-    返回 {ok, outcome, delta, merged_rule, value, sig, note, reason, chat?}：
-      ok=True/outcome='fixed' —— delta 让这张表过锚了（上游再走复核决定入库）
-      outcome='not_fixable'   —— LLM 判加规则修不了（小计混入/口径差/真缺行）
-      outcome='no_change'     —— 没给出有效 delta
-      outcome='still_bad'     —— 给了 delta 但合并后仍不过锚。"""
+              debug: bool = False, max_rounds: int = _MAX_ROUNDS) -> Dict:
+    """选对表但 base 解错 → LLM 提规则 delta(最多 K 轮) → 合并重解 → 过锚?
+    outcome: fixed | not_fixable | no_change | still_bad"""
     spec = get_spec(field)
     anchor = (get_anchors(code, year) or {}).get(spec.anchor_key) if spec.anchor_key else None
     rule_file = _RULE_FILE.get(field, "revenue")
     rule_key = _RULE_KEY.get(field, "revenue_breakdown")
     base_rule = load_rule(rule_file) or {}
-    section = (base_rule.get(rule_key) or {})
 
-    base_val = _reparse_under(code, year, field, chosen, None)     # base 解这张选中表
-    variables = {
-        "field": field, "field_label": _LABEL.get(field, field),
-        "anchor": f"{anchor:,.0f} 元" if anchor else "无",
-        "current_dimensions": _fmt_map(section.get("dimensions") or {}),
-        "current_aliases": _fmt_map(section.get("header_aliases") or {}),
-        "dim_diff": _dim_diff_text(base_val or {}, spec, anchor),
-        "value_json": _json(base_val),
-        "table_text": _grid_to_text(chosen.get("table") or []),
-    }
-    messages = build_messages("rule_heal", variables)["messages"]
-    raw = chat(messages, role="judge", temperature=0, model=resolve_model("rule_heal"))
-    v = _extract_json(raw) or {}
-    chat_log = {"prompt": messages[-1]["content"] if messages else "", "reply": raw} if debug else None
+    base_val = _reparse_under(code, year, field, chosen, None)
+    accumulated: Dict = {}
+    chats: List[Dict] = []
+    last_reason = last_note = ""
+    last_diff = _dim_diff_text(base_val or {}, spec, anchor)
 
-    delta = _sanitize_delta(v.get("delta") or {})
-    reason = v.get("reason")
-    note = v.get("note") or reason or ""
-    base_out = {"code": code, "year": year, "field": field, "delta": delta,
-                "note": note, "reason": reason, "fixable_claim": v.get("fixable")}
+    for round_i in range(1, max(1, max_rounds) + 1):
+        merged = deep_merge(base_rule, {rule_key: accumulated}) if accumulated else base_rule
+        view = _section_view(merged, rule_key)
+        uo = view.get("unit_ratio_override")
+        variables = {
+            "field": field, "field_label": _LABEL.get(field, field),
+            "anchor": f"{anchor:,.0f} 元" if anchor else "无",
+            "round": str(round_i), "max_rounds": str(max_rounds),
+            "current_dimensions": _fmt_map(view["dimensions"]),
+            "current_aliases": _fmt_aliases(view["header_aliases"]),
+            "current_unit_override": str(uo) if uo else "(未设,自动检测)",
+            "prior_block": _prior_block(round_i, accumulated, last_diff),
+            "dim_diff": last_diff,
+            "value_json": _json(_reparse_under(code, year, field, chosen, merged) if accumulated else base_val),
+            "table_text": _grid_to_text(chosen.get("table") or []),
+        }
+        messages = build_messages("rule_heal", variables)["messages"]
+        raw = chat(messages, role="judge", temperature=0, model=resolve_model("rule_heal"))
+        v = _extract_json(raw) or {}
+        if debug:
+            chats.append({"round": round_i, "prompt": messages[-1]["content"] if messages else "", "reply": raw})
+
+        delta = _sanitize_delta(v.get("delta") or {})
+        last_reason = v.get("reason") or ""
+        last_note = v.get("note") or last_reason or ""
+
+        if v.get("fixable") is False and not delta:
+            return _pack(code, year, field, False, "not_fixable", accumulated, None, None, None,
+                         last_note, last_reason, chats, round_i, debug)
+
+        if not delta:
+            return _pack(code, year, field, False, "no_change", accumulated, None, None, None,
+                         last_note, last_reason, chats, round_i, debug)
+
+        accumulated = deep_merge(accumulated, delta)
+        merged = deep_merge(base_rule, {rule_key: accumulated})
+        value = _reparse_under(code, year, field, chosen, merged)
+        sig = field_plausibility(spec, value or {}, get_anchors(code, year) or {})
+        last_diff = _dim_diff_text(value or {}, spec, anchor)
+        if sig.get("confidence") == "high":
+            return _pack(code, year, field, True, "fixed", accumulated, merged, value, sig,
+                         last_note, last_reason, chats, round_i, debug)
+
+    return _pack(code, year, field, False, "still_bad", accumulated, None,
+                 _reparse_under(code, year, field, chosen, deep_merge(base_rule, {rule_key: accumulated})),
+                 field_plausibility(spec, _reparse_under(code, year, field, chosen,
+                                   deep_merge(base_rule, {rule_key: accumulated})) or {},
+                                  get_anchors(code, year) or {}),
+                 last_note, last_reason, chats, max_rounds, debug,
+                 dim_diff_after=last_diff)
+
+
+def _pack(code, year, field, ok, outcome, delta, merged_rule, value, sig,
+          note, reason, chats, rounds_used, debug, dim_diff_after=None) -> Dict:
+    out = {"code": code, "year": year, "field": field, "ok": ok, "outcome": outcome,
+           "delta": delta, "note": note, "reason": reason, "rounds_used": rounds_used,
+           "fixable_claim": ok or outcome not in ("not_fixable", "no_change")}
+    if merged_rule and ok:
+        out["merged_rule"] = merged_rule
+    if value is not None:
+        out["value"] = value
+    if sig is not None:
+        out["sig"] = sig
+    if dim_diff_after:
+        out["dim_diff_after"] = dim_diff_after
+    elif value is not None and not ok:
+        spec = get_spec(field)
+        anchor = (get_anchors(code, year) or {}).get(spec.anchor_key) if spec.anchor_key else None
+        out["dim_diff_after"] = _dim_diff_text(value or {}, spec, anchor)
     if debug:
-        base_out["chat"] = chat_log
-
-    if v.get("fixable") is False and not delta:
-        return {**base_out, "ok": False, "outcome": "not_fixable"}
-    if not delta:
-        return {**base_out, "ok": False, "outcome": "no_change"}
-
-    merged = deep_merge(base_rule, {rule_key: delta})
-    value = _reparse_under(code, year, field, chosen, merged)
-    sig = field_plausibility(spec, value or {}, get_anchors(code, year) or {})
-    ok = sig.get("confidence") == "high"
-    return {**base_out, "ok": ok, "outcome": "fixed" if ok else "still_bad",
-            "merged_rule": merged if ok else None, "value": value, "sig": sig,
-            "dim_diff_after": _dim_diff_text(value or {}, spec, anchor)}
+        out["chat"] = chats[-1] if len(chats) == 1 else {"rounds": chats}
+    return out
 
 
 def _fmt_map(d: dict) -> str:
     if not d:
         return "(空)"
     return "\n".join(f"  {k} → {v}" for k, v in d.items())
+
+
+def _fmt_aliases(d: dict) -> str:
+    if not d:
+        return "(空)"
+    lines = []
+    for role, vals in d.items():
+        lines.append(f"  {role}: {', '.join(vals)}")
+    return "\n".join(lines)
 
 
 def _json(v) -> str:

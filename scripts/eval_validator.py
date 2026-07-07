@@ -85,13 +85,8 @@ def evaluate(gold_path: str, validator: str):
         if validator == "hard":
             preds = _predict_hard(parse_result)
         elif validator == "llm":
-            from scripts.auto_iterate import _ai_validate
-            _all, frs = _ai_validate(reparse[1], parse_result)
-            name2key = {"营收结构": "revenue_breakdown", "研发费用": "rnd_info",
-                        "员工数据": "employees", "成本构成": "cost_breakdown",
-                        "前五大客户": "top_clients", "前五大供应商": "top_suppliers"}
-            preds = {name2key[fr["name"]]: fr.get("correct", True)
-                     for fr in frs if fr.get("name") in name2key}
+            raise SystemExit(
+                "llm 校验器依赖的 auto_iterate 已迁入 archive/scripts/；请用 --validator hard")
         else:
             raise SystemExit(f"未知 validator: {validator}")
 

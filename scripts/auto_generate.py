@@ -19,7 +19,7 @@ from src.eval.run_eval import load_golden
 from src.agents.code_generator import generate_parser
 
 CODE, YEAR = "000425", 2025
-OUT = "src/parsers/versions/rev_000425_auto.py"
+OUT = "archive/demo-parsers/rev_000425_auto.py"
 
 
 def main():

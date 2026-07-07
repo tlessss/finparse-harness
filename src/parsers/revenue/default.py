@@ -38,6 +38,14 @@ class RevenueParser(BaseParser):
             return None
         return rule.get("revenue_breakdown", {}).get("header_aliases")
 
+    def _resolve_unit_ratio(self, sel: dict) -> int:
+        """表头/标题检测单位;规则里 unit_ratio_override 可强制(万元/千元自愈旋钮)。"""
+        rule = load_rule("revenue") or {}
+        ov = (rule.get("revenue_breakdown") or {}).get("unit_ratio_override")
+        if ov in (1, 1000, 10000, 100000000):
+            return int(ov)
+        return detect_unit((sel.get("caption", "") or "") + " " + (sel.get("text", "") or ""))
+
     def _section_labels(self) -> dict:
         """切桶标记：以 revenue.yaml 的 dimensions 为准，代码 _FALLBACK_DIMENSIONS 补缺/兜底。
         这是自愈"改规则"的落点——往 YAML 的 dimensions 加一条，这里立即生效，无需改代码。"""
@@ -102,7 +110,7 @@ class RevenueParser(BaseParser):
             return {"revenue_breakdown": None, "status": "no_table_found"}
 
         table = sel["table"]
-        unit_ratio = detect_unit((sel.get("caption", "") or "") + " " + (sel.get("text", "") or ""))
+        unit_ratio = self._resolve_unit_ratio(sel)
         # 溯源：选中表自带的 (页码, cell_bbox)
         self._bbox_map = {id(table): (sel.get("page"), sel.get("cell_bbox"))}
         result, provenance = self._classify(
@@ -190,10 +198,23 @@ class RevenueParser(BaseParser):
         sections = []
         for row in table:
             found = None
-            for c in row:
+            for c in row:                                   # 精确命中(原行为,无条件):"分行业"等
                 if c and c.strip() in section_labels:
                     found = section_labels[c.strip()]
                     break
+            if not found:
+                # 带修饰前缀的切桶行,如"主营业务分行业""(2)分产品":以维度标记结尾即算。
+                # 仅对**纯标签行(无金额)**放开,防"…分产品的收入"这类数据行被误判成切桶头。
+                has_money = any(self._looks_like_money((c or "").replace(",", "").replace("，", "")) for c in row)
+                if not has_money:
+                    for c in row:
+                        s = (c or "").strip()
+                        for key, dim in section_labels.items():
+                            if s != key and s.endswith(key) and 0 < len(s) - len(key) <= 6:
+                                found = dim
+                                break
+                        if found:
+                            break
             sections.append(found)
 
         name_col, amount_col, _ = self._resolve_columns(table, amount_hint=amount_hint)  # 占比列不再取(占比不解析)
@@ -210,11 +231,19 @@ class RevenueParser(BaseParser):
         provenance = {}
         current = "segments"
         seen = {}
+        child_run = None   # "其中：X" 起的子拆分段:累计子项金额,≤父项预算(±2%)的都是子项(跳过,不计入顶层)
+        has_markers = any(sections)     # 表内是否有维度切桶头(分行业/分产品/…)
+        seen_marker = False             # 是否已进入第一个维度段
+        # 口径前导行(营收=主营+其他):有维度头时,首个维度头之前的"其他业务收入"是口径前导、不是分产品,
+        # 别塞进默认 segments 桶(否则 segments=其他业务+产品分项≈营收,复核判结构异常,苏宁002024)。主营/合计已由 is_total_row 挡。
+        _PREAMBLE = ("其他业务收入", "其他业务")
 
         for row_idx, row in enumerate(table):
             sec = sections[row_idx]
             if sec:
                 current = sec
+                child_run = None            # 换维度 → 子拆分段结束
+                seen_marker = True
                 if current not in seen:
                     seen[current] = set()
                 continue
@@ -237,10 +266,26 @@ class RevenueParser(BaseParser):
 
             if not name or name in ("项 目", "项目", "") or is_total_row(name):
                 continue
-            if name.startswith("其中"):       # "其中：X" 是上一项的子拆分,不计入顶层(否则重复计数)
-                continue
+            if has_markers and not seen_marker and name.replace(" ", "") in _PREAMBLE:
+                continue                     # 口径前导"其他业务收入":有维度头时不当分项(见上)
 
             amount = self._parse_number(amount_raw) if amount_raw else None
+            amt_yuan = convert_to_yuan(amount, unit_ratio) if amount is not None else None
+
+            # 父子行去重:"其中：X" 标记上一顶层项的子拆分。个别PDF只在首个子项前标"其中：",
+            # 后续兄弟(如"机器人与自动化/工业技术")不再带标记 → 靠金额累计续判:
+            # 累计子项额 ≤ 父项额(±2%)就都算子项跳过;一旦超出父项预算,说明子拆分段结束、本行是新顶层项。
+            # 否则父项(122M)+四个子项(共122M)会被重复计入 → 该维度和≈1.19×营收(美的000333)。
+            if name.startswith("其中"):
+                parent_amt = result[current][-1]["revenue_yuan"] if result[current] else None
+                child_run = {"parent": parent_amt, "cum": amt_yuan or 0} if (parent_amt and amt_yuan is not None) else None
+                continue
+            if child_run and amt_yuan is not None:
+                if child_run["cum"] + amt_yuan <= child_run["parent"] * 1.02:
+                    child_run["cum"] += amt_yuan   # 仍在父项预算内 → 子项,不计入顶层
+                    continue
+                child_run = None                   # 超出父项预算 → 子拆分段结束,本行按新顶层项处理
+
             if amount is None:                   # 只收有金额的项(占比不再解析,下游用 金额/锚 算)
                 continue
 
@@ -265,7 +310,58 @@ class RevenueParser(BaseParser):
                         if ab:
                             provenance[f"{base}.revenue_yuan"] = {"page": page, "bbox": ab}
 
+        # 收尾:折叠**未带"其中："标记**的父子重复(如"中国大陆市场=东部+南部+西部+北部",苏宁002024)。
+        for dim in result:
+            keep = self._fold_nested(result[dim])
+            if all(keep):
+                continue
+            old_to_new, ni = {}, 0
+            for oi, k in enumerate(keep):
+                if k:
+                    old_to_new[oi] = ni
+                    ni += 1
+            result[dim] = [it for it, k in zip(result[dim], keep) if k]
+            prefix, remapped = dim + "[", {}       # 重建该维度溯源索引(删掉子项的溯源)
+            for key, val in provenance.items():
+                if key.startswith(prefix):
+                    idx_str, tail = key[len(prefix):].split("]", 1)
+                    oi = int(idx_str)
+                    if oi in old_to_new:
+                        remapped[f"{dim}[{old_to_new[oi]}]{tail}"] = val
+                else:
+                    remapped[key] = val
+            provenance = remapped
+
         return result, provenance
+
+    @staticmethod
+    def _fold_nested(items):
+        """去未标记的父子重复:某项之后若干连续兄弟项之和≈该项(±1%,≥2项)→它们是它的明细拆分,
+        **删掉父(聚合)行、留子(明细)行**——明细更完整,金额锚一样对得上,且复核要的是子区域/子产品明细。
+        只在**精确相等(≤1%)且≥2子项**时折叠——巧合成立极罕见,对正常表零影响;
+        专治没带"其中："标记的地区/产品嵌套(如'中国大陆市场=东部+南部+西部+北部',苏宁002024)。返回 keep 掩码。"""
+        n = len(items)
+        keep = [True] * n
+        i = 0
+        while i < n:
+            p = items[i].get("revenue_yuan")
+            if not p:
+                i += 1
+                continue
+            cum, j, cnt, folded = 0.0, i + 1, 0, False
+            while j < n:
+                v = items[j].get("revenue_yuan")
+                if v is None or cum + v > p * 1.01:
+                    break
+                cum += v
+                cnt += 1
+                j += 1
+                if cnt >= 2 and abs(cum - p) <= p * 0.01:
+                    keep[i] = False          # 删父聚合行,子明细行(i+1..i+cnt)保留
+                    folded = True
+                    break
+            i = (i + 1 + cnt) if folded else (i + 1)
+        return keep
 
     @staticmethod
     def _looks_like_money(s: str) -> bool:

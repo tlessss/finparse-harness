@@ -1,6 +1,12 @@
 """自愈管线决策单测 — mock 路由/修复，不碰 PDF/LLM。"""
 
-import src.agents.heal_pipeline as hp
+import os
+import sys
+_LEGACY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _LEGACY)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "."))
+
+import heal_pipeline as hp
 
 
 def test_routed_uses_certified(monkeypatch):

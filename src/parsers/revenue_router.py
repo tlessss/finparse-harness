@@ -204,8 +204,20 @@ def route_field(spec: FieldSpec, code: str, year: int,
                         "cache_hit": True, "candidates": 1, **base}
             route_invalidate(field, fp)               # 不达标=版式漂移了→作废缓存，往下重选
 
-    # ── ② 指纹缩候选 → 逐个跑 → 硬规则选优 ──
-    cands = candidates_for(field, fp, catalog)         # 用指纹把一堆解析器缩成几个候选
+    # ── ② 缩候选 → 逐个跑 → 硬规则选优 ──
+    # 主匹配 = **表+标题向量**(表级,准):待解析报告目标表去数字骨架 vs 认证解析器登记的 table_doc 余弦。
+    # 无向量命中(BGE挂/无table_doc)→ 退回文档级指纹 candidates_for。向量只缩候选,过金额锚仍是硬闸。
+    cands = []
+    if use_index:
+        try:
+            from src.eval.parser_catalog import candidates_by_vector
+            from src.parsers.infra.table_recall import report_table_doc
+            _sf = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd"}.get(field, "revenue")
+            rdoc = report_table_doc(code, year, _sf)
+            cands = candidates_by_vector(field, rdoc) if rdoc else []
+        except Exception:
+            cands = []
+    cands = cands or candidates_for(field, fp, catalog)
     best, tried = None, []
     for c in cands:
         try:

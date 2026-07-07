@@ -2,9 +2,11 @@
 
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "."))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "."))
 
-from src.parsers.registry import ParserRegistry, ReportParser, score_result
+from registry import ParserRegistry, ReportParser, score_result
 
 
 class FakeParser(ReportParser):

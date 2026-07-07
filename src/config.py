@@ -24,13 +24,21 @@ class Config:
     LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-chat")
     # 按单个 agent 覆盖模型的持久化文件（管理页写，llm_routing 读）；缺省全部回退 LLM_MODEL。
     AGENT_ROUTING_FILE: Path = Path(os.getenv("AGENT_ROUTING_FILE", str(ROOT / "goldset" / "llm_routing.json")))
-    # 管理页模型下拉候选（也允许自由填）。注：本期路由只切同一 OpenAI 兼容 endpoint 下的 model 字符串。
+    # 管理页模型下拉候选（也允许自由填）。按模型名前缀选 provider（见 llm_client._provider_for）：
+    # qwen* → DashScope(阿里百炼)，其余 → 默认 endpoint(DeepSeek)。
     LLM_AVAILABLE_MODELS = [
         m for m in os.getenv(
             "LLM_AVAILABLE_MODELS",
-            "deepseek-chat,deepseek-reasoner,claude-opus-4-8,claude-sonnet-5",
+            "deepseek-chat,deepseek-reasoner,qwen3-coder-plus,claude-opus-4-8,claude-sonnet-5",
         ).split(",") if m.strip()
     ]
+
+    # ── DashScope（阿里百炼，OpenAI 兼容）—— 给 codegen 用强代码模型 qwen3-coder-plus ──
+    DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
+    DASHSCOPE_BASE_URL: str = os.getenv(
+        "DASHSCOPE_BASE_URL",
+        "https://llm-xehrosf8m6c0da3u.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    )
 
     # ── PDF 缓存（复用 book-agent） ──
     PDF_CACHE_DIR: Path = Path(

@@ -252,135 +252,65 @@ def validate_report(stock_code: str = None, report_year: int = None):
 
 @app.post("/iterate")
 def run_iteration(stock_code: str, year: int):
-    """
-    执行带迭代闭环的完整解析流程（解析→校验→优化→重试→人工兜底）。
-    
-    参数同 /parse/by-code，但包含最多3次自动迭代。
-    """
-    # 查找 PDF 缓存
-    cache_dir = Config.PDF_CACHE_DIR
-    pdf_path = None
-    if cache_dir.exists():
-        for f in cache_dir.iterdir():
-            if f.suffix != ".pdf":
-                continue
-            parts = f.stem.split("_")
-            if len(parts) >= 2 and parts[0] == stock_code and parts[1] == str(year):
-                pdf_path = str(f)
-                break
-
-    if not pdf_path:
-        raise HTTPException(status_code=404, detail=f"PDF 未找到: {stock_code}_{year}.pdf")
-
-    stock = find_stock(stock_code)
-    company_name = stock["name"] if stock else None
-
-    from src.agents.iteration import IterationEngine
-    try:
-        engine = IterationEngine()
-        report = engine.run(
-            pdf_path=pdf_path,
-            stock_code=stock_code,
-            report_year=year,
-            company_name=company_name,
-            db_write=True,
-        )
-        return report
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """已废弃：旧 IterationEngine 已迁入 archive/legacy。请用 POST /pipeline/run_llm。"""
+    raise HTTPException(
+        status_code=410,
+        detail="POST /iterate 已废弃(见 archive/legacy/iteration.py)。请用 POST /pipeline/run_llm",
+    )
 
 
-# ── 人工复核端点 ──
+def _deprecated_410(detail: str):
+    raise HTTPException(status_code=410, detail=detail)
+
+
+# ── 已废弃端点（PR3 迁入 archive，前端未使用）──
 
 @app.get("/review/tasks")
 def list_review_tasks(limit: int = 20, pending_only: bool = False):
-    """列出复核任务"""
-    from src.review.manager import ReviewManager
-    mgr = ReviewManager()
-    if pending_only:
-        tasks = mgr.list_pending(limit=limit)
-    else:
-        tasks = mgr.list_all(limit=limit)
-    return {"tasks": tasks, "count": len(tasks)}
+    _deprecated_410("旧 ReviewManager 已迁入 archive/legacy/review。请用 GET /review/task?code=")
 
 
 @app.get("/review/task/{task_id}")
 def get_review_task(task_id: int):
-    """获取复核任务详情"""
-    from src.review.manager import ReviewManager
-    mgr = ReviewManager()
-    task = mgr.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    return task
+    _deprecated_410("旧 ReviewManager 已迁入 archive/legacy/review")
 
 
 @app.post("/review/{task_id}/start")
 def start_review(task_id: int, reviewer: str = "admin"):
-    """开始审核"""
-    from src.review.manager import ReviewManager
-    mgr = ReviewManager()
-    ok = mgr.start_review(task_id, reviewer=reviewer)
-    return {"success": ok, "task_id": task_id}
+    _deprecated_410("旧 ReviewManager 已迁入 archive/legacy/review")
 
 
 @app.post("/review/{task_id}/approve")
 def approve_review(task_id: int, comment: str = ""):
-    """审核通过"""
-    from src.review.manager import ReviewManager
-    mgr = ReviewManager()
-    ok = mgr.approve(task_id, comment=comment)
-    return {"success": ok, "task_id": task_id}
+    _deprecated_410("旧 ReviewManager 已迁入 archive/legacy/review")
 
 
 @app.post("/review/{task_id}/reject")
 def reject_review(task_id: int, comment: str = ""):
-    """驳回"""
-    from src.review.manager import ReviewManager
-    mgr = ReviewManager()
-    ok = mgr.reject(task_id, comment=comment)
-    return {"success": ok, "task_id": task_id}
+    _deprecated_410("旧 ReviewManager 已迁入 archive/legacy/review")
 
 
 @app.post("/review/{task_id}/fix")
 def apply_fix(task_id: int, fixes: dict, comment: str = ""):
-    """应用人工修正数据"""
-    from src.review.manager import ReviewManager
-    mgr = ReviewManager()
-    result = mgr.apply_manual_fix(task_id, fixes, comment=comment)
-    return result
+    _deprecated_410("旧 ReviewManager 已迁入 archive/legacy/review")
 
-
-# ── 导出端点 ──
 
 @app.get("/export/json")
 def export_parse_json(stock_code: str = None, year: int = None, limit: int = 10):
-    """导出解析结果为 JSON"""
-    from src.export.exporter import export_json
-    return {"records": export_json(stock_code=stock_code, year=year, limit=limit)}
+    _deprecated_410("export 已迁入 archive/legacy/export")
 
 
 @app.get("/export/csv")
 def export_parse_csv(stock_code: str = None, year: int = None, limit: int = 100):
-    """导出解析结果为 CSV"""
-    from src.export.exporter import export_csv
-    from fastapi.responses import PlainTextResponse
-    csv_content = export_csv(stock_code=stock_code, year=year, limit=limit)
-    return PlainTextResponse(
-        content=csv_content,
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=finparse_export.csv"},
-    )
+    _deprecated_410("export 已迁入 archive/legacy/export")
 
 
 @app.get("/export/versions")
 def export_parser_versions(limit: int = 20):
-    """获取解析器版本历史"""
-    from src.export.exporter import get_parser_version_history
-    return {"versions": get_parser_version_history(limit=limit)}
+    _deprecated_410("export 已迁入 archive/legacy/export")
 
 
-# ── 控制 / 审核台（给前端 console）──
+# ── 控制台审核台（活跃）──
 
 class RecodeRequest(BaseModel):
     stock_code: str
@@ -390,16 +320,13 @@ class RecodeRequest(BaseModel):
 
 @app.post("/control/{action}")
 def console_control(action: str):
-    """暂停/继续/停止跑批。action ∈ pause|resume|stop。"""
-    from src.console_service import control
-    return control(action)
+    """已废弃：请用 POST /batch/control/{action}。"""
+    _deprecated_410("POST /control 已废弃，请用 POST /batch/control")
 
 
 @app.get("/heal/records")
 def console_heal_records():
-    """自愈活动记录（路由实跑产出）。"""
-    from src.console_service import heal_records
-    return {"records": heal_records()}
+    _deprecated_410("GET /heal/records 已废弃，请用 /pipeline/result 或 /pipeline/failures")
 
 
 @app.post("/review/recode")
@@ -418,9 +345,7 @@ def console_review_task(stock_code: str, year: int = 2025, field: str = "revenue
 
 @app.get("/debug/select")
 def debug_select(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
-    """选表调试台：该字段所有候选表的 得分明细 + 淘汰原因 + 预览，看选表准不准。"""
-    from src.console_service import select_debug
-    return select_debug(stock_code, year, field)
+    _deprecated_410("GET /debug/select 已废弃，请用 GET /debug/recall")
 
 
 @app.get("/debug/page")
@@ -977,6 +902,14 @@ def pipeline_llm_api(stock_code: str, year: int = 2025, field: str = "revenue_br
     return rec
 
 
+@app.get("/pipeline/timeline")
+def pipeline_timeline_api(stock_code: str, year: int = 2025, field: str = "revenue_breakdown",
+                          run_id: str = None, limit: int = 200):
+    """案件时间线：优先读 process_events；无事件时回退 chain+verify 兼容视图。"""
+    from src.pipeline import timeline_from_db
+    return timeline_from_db(stock_code, year, field, run_id=run_id, limit=limit)
+
+
 class PipelineRunRequest(BaseModel):
     codes: list
     year: int = 2025
@@ -985,12 +918,8 @@ class PipelineRunRequest(BaseModel):
 
 @app.post("/pipeline/run")
 def pipeline_run_api(req: PipelineRunRequest):
-    """对已缓存的报告即时跑确定性成功率并保存（不发 LLM、不扫表）。"""
-    from src.pipeline import analyze_batch, save_result
-    res = analyze_batch(req.codes, req.year, req.fields, use_llm=False, log=lambda *_: None)
-    res["codes"] = req.codes
-    save_result(res)
-    return res
+    """已废弃：请用 POST /pipeline/run_llm（完整 LLM 链）或 scripts 内 analyze_batch。"""
+    _deprecated_410("POST /pipeline/run 已废弃，请用 POST /pipeline/run_llm")
 
 
 class PipelineRunLLMRequest(BaseModel):

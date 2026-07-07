@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 
 _DB = "goldset/test_store.db"
 
@@ -37,6 +38,14 @@ def _conn():
         stock_code TEXT, year INTEGER, field TEXT,
         outcome TEXT, via TEXT, reason TEXT, chain TEXT, verify TEXT)""")
     c.execute("CREATE INDEX IF NOT EXISTS ix_pr_key ON pipeline_runs(stock_code,year,field,id)")
+    c.execute("""CREATE TABLE IF NOT EXISTS process_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT, created_at TEXT,
+        stock_code TEXT, year INTEGER, field TEXT,
+        agent_id TEXT, event_type TEXT, outcome TEXT,
+        payload_json TEXT)""")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_pe_run ON process_events(run_id,id)")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_pe_key ON process_events(stock_code,year,field,id DESC)")
     return c
 
 
@@ -259,4 +268,59 @@ def list_latest_runs(year, fields=None):
     out = [_parse_run(r) for r in rows]
     if fields:
         out = [d for d in out if d["field"] in fields]
+    return out
+
+
+def new_run_id() -> str:
+    """生成一次流程运行的 run_id。"""
+    return str(uuid.uuid4())
+
+
+def emit_event(run_id, code, year, field, agent_id, event_type, outcome=None, payload=None):
+    """追加一条流程事件。payload 会存为 JSON。"""
+    c = _conn()
+    c.execute(
+        """INSERT INTO process_events(run_id,created_at,stock_code,year,field,agent_id,event_type,outcome,payload_json)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (run_id, time.strftime("%Y-%m-%d %H:%M:%S"), code, int(year), field, agent_id, event_type, outcome,
+         json.dumps(payload, ensure_ascii=False) if payload is not None else None))
+    c.commit()
+    rid = c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    c.close()
+    return rid
+
+
+def list_events(code, year, field, run_id=None, limit=200):
+    """按 run_id（优先）或按最近记录查询事件时间线。"""
+    c = _conn()
+    if run_id:
+        rows = c.execute(
+            """SELECT * FROM process_events
+               WHERE run_id=? AND stock_code=? AND year=? AND field=?
+               ORDER BY id ASC LIMIT ?""",
+            (run_id, code, int(year), field, int(limit))).fetchall()
+    else:
+        latest = c.execute(
+            """SELECT run_id FROM process_events
+               WHERE stock_code=? AND year=? AND field=?
+               ORDER BY id DESC LIMIT 1""",
+            (code, int(year), field)).fetchone()
+        if not latest:
+            c.close()
+            return []
+        rows = c.execute(
+            """SELECT * FROM process_events
+               WHERE run_id=? AND stock_code=? AND year=? AND field=?
+               ORDER BY id ASC LIMIT ?""",
+            (latest["run_id"], code, int(year), field, int(limit))).fetchall()
+    c.close()
+    out = [dict(r) for r in rows]
+    for r in out:
+        if r.get("payload_json"):
+            try:
+                r["payload"] = json.loads(r["payload_json"])
+            except Exception:
+                r["payload"] = None
+        else:
+            r["payload"] = None
     return out

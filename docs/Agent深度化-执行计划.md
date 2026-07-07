@@ -220,10 +220,13 @@ run_field(use_llm=True)
 
 ## Phase 4 — 事件流 + Steward + UI（P2，1–2 天）
 
+> **专题文档**：链路可见性诊断、生产 Pipeline 事件清单、Timeline UI 与分期见 [`链路观测-案件时间线.md`](链路观测-案件时间线.md)。观测与正确率同等重要，优先于超级管家接线。
+
 ### 4.1 `process_events` 表
 
-- 字段：`run_id, ts, agent_id, event_type, payload_json`
-- 事件：`parse_saved | stage1_prepare | stage1_chat | stage2_prepare | stage2_chat | apply_fix`
+- 字段：`run_id, ts, stock_code, year, field, agent_id, event_type, outcome, payload_json`
+- **生产 Pipeline 事件**（`run_field`）：`input_ready | routed | cold_parse | anchor_check | verify | heal_select | rule_heal | extract_heal | diagnose | committed | human`（详见专题文档 §4.2）
+- **调试台事件**：`parse_saved | stage1_prepare | stage1_chat | stage2_prepare | stage2_chat | apply_fix`
 
 ### 4.2 薄 Steward（确定性）
 
@@ -287,7 +290,8 @@ run_field(use_llm=True)
 
 | 操作 | 路径 |
 |------|------|
-| 新建 | `src/console/field_resolver.py` |
+| **专题** | [`docs/链路观测-案件时间线.md`](链路观测-案件时间线.md) — 观测 / Timeline / P0–P3 |
+| 新建 | `frontend/.../CaseTimeline.tsx` |
 | 新建 | `src/case_steward.py` |
 | 改 | `src/eval/test_store.py` |
 | 改 | `src/agents/judge_diagnose_agent.py` |

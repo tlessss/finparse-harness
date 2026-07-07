@@ -298,6 +298,118 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
     return _stitch_cross_page(results)
 
 
+# 抽表自愈(L3):单页换 pdfplumber 策略重抽。比全量 scan_pdf 轻,只动目标页。
+_RESCAN_PROFILES = (
+    {"name": "lines_lines", "settings": {"vertical_strategy": "lines", "horizontal_strategy": "lines"}},
+    {"name": "text_text", "settings": {"vertical_strategy": "text", "horizontal_strategy": "text"}},
+    {"name": "lines_text", "settings": {"vertical_strategy": "lines", "horizontal_strategy": "text"}},
+    {"name": "snap_loose", "settings": {"snap_tolerance": 5, "join_tolerance": 5}},
+    # camelot 兜底:治无线框/rect 画的表(pdfplumber 抽不出列时,苏宁/多家创业板附注表)。engine 写进 settings 便于固化读回。
+    {"name": "camelot_stream", "settings": {"engine": "camelot", "flavor": "stream"}},
+    {"name": "camelot_lattice", "settings": {"engine": "camelot", "flavor": "lattice"}},
+)
+
+
+def rescan_page(pdf_path: str, page_num: int, table_settings: Optional[dict] = None) -> List[Dict]:
+    """重抽单页所有表(与 scan_pdf 单项同形,不做跨页 stitch)。供 extract_heal 换参重试。"""
+    page_context = detect_page_context(pdf_path)
+    out = []
+    with pdfplumber.open(pdf_path) as pdf:
+        if page_num < 1 or page_num > len(pdf.pages):
+            return []
+        page = pdf.pages[page_num - 1]
+        section = page_context.get(page_num, SECTION_OTHER)
+        kw = {"table_settings": table_settings} if table_settings else {}
+        try:
+            found = page.find_tables(**kw)
+        except Exception:
+            return []
+        for tbl in found:
+            try:
+                grid = tbl.extract()
+            except Exception:
+                continue
+            if not grid:
+                continue
+            cell_bbox = []
+            for row in tbl.rows:
+                cells = getattr(row, "cells", None) or []
+                cell_bbox.append([tuple(c) if c else None for c in cells])
+            cell_bbox = _align_bbox(grid, cell_bbox)
+            text = " ".join(c.replace("\n", " ") for row in grid for c in row if c)
+            tbb = tuple(tbl.bbox) if getattr(tbl, "bbox", None) else None
+            out.append({
+                "page": page_num,
+                "table": grid,
+                "text": text,
+                "caption": _caption_above(page, tbb),
+                "section": section,
+                "cell_bbox": cell_bbox,
+                "table_bbox": tbb,
+                "page_h": float(getattr(page, "height", 0) or 0),
+                "rescan_settings": table_settings or {},
+            })
+    return out
+
+
+def rescan_page_camelot(pdf_path: str, page_num: int, flavor: str = "stream") -> List[Dict]:
+    """用 camelot 重抽单页表——治**无线框/rect 画的表**(pdfplumber lines 策略抽不出列,text 也结构错)。
+    stream=按文字位置推列(无线框表),lattice=按线框。与 scan_pdf 单项同形;camelot 坐标系与 pdfplumber
+    不同,cell_bbox 置 None(溯源退化,不影响过锚/入库——双闸仍在下游守)。camelot 未装则优雅退空。"""
+    try:
+        import camelot
+    except Exception:
+        return []
+    section = detect_page_context(pdf_path).get(page_num, SECTION_OTHER)
+    page_h = 0.0
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            if 0 <= page_num - 1 < len(pdf.pages):
+                page_h = float(getattr(pdf.pages[page_num - 1], "height", 0) or 0)
+    except Exception:
+        pass
+    try:
+        tables = camelot.read_pdf(pdf_path, pages=str(page_num), flavor=flavor)
+    except Exception:
+        return []
+    def _item(grid, tag):
+        text = " ".join(c.replace("\n", " ") for row in grid for c in row if c)
+        return {"page": page_num, "table": grid, "text": text, "caption": "",
+                "section": section, "cell_bbox": None, "table_bbox": None, "page_h": page_h,
+                "rescan_settings": {"engine": "camelot", "flavor": flavor, "tag": tag}}
+
+    grids = []
+    for t in tables:
+        try:
+            grid = [[(c or "").strip() for c in row] for row in t.df.values.tolist()]
+        except Exception:
+            continue
+        if grid and any(any(c for c in row) for row in grid):
+            grids.append(grid)
+    out = [_item(g, "single") for g in grids]
+    # camelot 常把一张跨栏/多段的构成表拆成同页多张 → 追加一个"全页拼接"候选(所有行按序并起、列数对齐)。
+    # 只是多给一个候选,过锚+复核双闸兜底,拼错不会被采纳(治 300005 这类:分行业全、分产品/分地区被拆到第二张)。
+    if len(grids) > 1:
+        ncol = max((len(r) for g in grids for r in g), default=0)
+        merged = [list(r) + [""] * (ncol - len(r)) for g in grids for r in g]
+        out.append(_item(merged, "merged"))
+    return out
+
+
+def rescan_page_any(pdf_path: str, page_num: int, settings: Optional[dict] = None) -> List[Dict]:
+    """按 settings 分发抽表引擎:settings.engine=='camelot' 走 camelot,否则 pdfplumber。
+    settings 自描述引擎 → 固化后读回(apply_saved_extract_profiles)也能分发对引擎。"""
+    settings = settings or {}
+    if settings.get("engine") == "camelot":
+        return rescan_page_camelot(pdf_path, page_num, settings.get("flavor", "stream"))
+    return rescan_page(pdf_path, page_num, settings)
+
+
+def list_rescan_profiles() -> List[Dict]:
+    """返回预设重抽配置(名 + table_settings/engine)。pdfplumber 4 套在前(快),camelot 2 套兜底(治无线框表)。"""
+    return [dict(p) for p in _RESCAN_PROFILES]
+
+
 # ── 表格类型特征配置 ──
 
 # 每个表格类型允许的章节上下文

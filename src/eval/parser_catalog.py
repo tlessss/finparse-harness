@@ -5,7 +5,7 @@
 挑最像的（跑一遍对 golden 打分），据分决定 复用 / fork / 新建（见 code_generator.repair）。
 
 注：这里用 golden 打分选母本——适用于"正在认证某失败报告"的构建场景。
-生产运行时对无 golden 的新报告，选母本/路由用硬规则代理（见 parsers/registry.py）。
+生产运行时对无 golden 的新报告，选母本/路由用硬规则代理（见 `revenue_router.route_field`）。
 """
 
 import json
@@ -41,18 +41,46 @@ def _save_manifest(parsers: List[Dict]) -> None:
 
 
 def certify(key: str, path: str, field: str = _DEFAULT_FIELD,
-            fingerprints: Optional[List[str]] = None) -> None:
-    """登记一个已 exact 的解析器（去重；记录字段 + 认证时的版式指纹，供按字段缩候选）。"""
+            fingerprints: Optional[List[str]] = None, table_doc: Optional[str] = None) -> None:
+    """登记一个认证解析器（去重）。记录字段 + 版式指纹（文档级,老快路径） + **table_doc**（目标表去数字+标题文字骨架,
+    表级向量匹配用——比文档级指纹准,是主匹配键）。"""
     cur = load_certified()
     fps = [f for f in (fingerprints or []) if f]
     for c in cur:
-        if c["path"] == path:                      # 已在 → 并入指纹
+        if c["path"] == path:                      # 已在 → 并入指纹 / 补 table_doc
             c["fingerprints"] = sorted(set(c.get("fingerprints", [])) | set(fps))
             c.setdefault("field", field)
+            if table_doc:
+                c["table_doc"] = table_doc
             _save_manifest(cur)
             return
-    cur.append({"key": key, "path": path, "field": field, "fingerprints": sorted(set(fps))})
+    entry = {"key": key, "path": path, "field": field, "fingerprints": sorted(set(fps))}
+    if table_doc:
+        entry["table_doc"] = table_doc
+    cur.append(entry)
     _save_manifest(cur)
+
+
+def candidates_by_vector(field: str, report_doc: str, catalog: Optional[List[Dict]] = None,
+                         top_k: int = 3, threshold: float = 0.5) -> List[Dict]:
+    """**表+标题级向量匹配**（取代文档级指纹缩候选）：把待解析报告"目标表去数字+标题骨架"(report_doc)
+    与每个认证解析器登记的 table_doc 算 BGE 余弦，取最像的 top_k。余弦只是**软先验**——
+    最终仍靠 route_field 跑候选过金额锚验证。BGE 不可用 / 无 table_doc → 返回 []（回退指纹）。"""
+    catalog = catalog if catalog is not None else load_certified()
+    cands = [c for c in catalog if c.get("field", _DEFAULT_FIELD) == field and c.get("table_doc")]
+    if not cands or not report_doc:
+        return []
+    try:
+        from src.validators.vector_validator import _embed
+        from sklearn.metrics.pairwise import cosine_similarity
+        rv = _embed([report_doc])
+        dv = _embed([c["table_doc"] for c in cands])
+        sims = cosine_similarity(rv, dv)[0]
+    except Exception:
+        return []
+    ranked = sorted(({**c, "vec_sim": round(float(s), 4)} for c, s in zip(cands, sims)),
+                    key=lambda x: -x["vec_sim"])
+    return [c for c in ranked if c["vec_sim"] >= threshold][:top_k]
 
 
 def tag_fingerprint(path: str, fp: str) -> None:

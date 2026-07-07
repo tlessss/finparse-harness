@@ -44,6 +44,19 @@ def _table_textdoc(table: List[list], caption: str = "") -> str:
     return " ".join(uniq)[:300]
 
 
+def report_table_doc(code: str, year: int, field: str = "revenue") -> str:
+    """待解析报告"目标表"的去数字+标题文字骨架——供**表级向量路由**(匹认证解析器)。
+    取该字段向量召回最像的那张表(即最可能的目标构成表)做代表。取不到 → 空串(路由回退指纹)。"""
+    from src.eval.table_cache import get_tables
+    tables = get_tables(code, year)
+    if not tables:
+        return ""
+    top = vector_recall(tables, field, top_k=1)
+    if not top:
+        return ""
+    return _table_textdoc(top[0].get("table"), top[0].get("caption", ""))
+
+
 def vector_recall(tables: List[Dict], field: str = "revenue",
                   top_k: int = 6, threshold: float = 0.5) -> List[Dict]:
     """向量召回候选表。

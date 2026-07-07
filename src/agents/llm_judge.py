@@ -263,6 +263,19 @@ def _field_prompt_notes(field: str, spec=None) -> str:
     return ("\n" + "\n".join(lines) + "\n") if lines else ""
 
 
+def _strip_ratio(field_value, spec):
+    """复核只看名称+金额（占比不解析、不用核）→ 从展示 JSON 里删掉 ratio_pct，
+    免得弱复核模型盯着『占比为 null / 源文有占比却没提取』纠结，误判 wrong_table（如矩阵表 300014）。"""
+    rk = getattr(spec, "ratio_key", "ratio_pct") or "ratio_pct"
+    def _row(r):
+        return {k: v for k, v in r.items() if k != rk} if isinstance(r, dict) else r
+    if isinstance(field_value, dict):
+        return {d: [_row(r) for r in (rows or [])] for d, rows in field_value.items()}
+    if isinstance(field_value, list):
+        return [_row(r) for r in field_value]
+    return field_value
+
+
 def build_verify_messages(field: str, code: str, year: int, field_value, sig: Dict,
                           provenance: Dict = None, spec=None, unit_label: str = None,
                           source_override: str = None, extra_note: str = None):
@@ -299,7 +312,7 @@ def build_verify_messages(field: str, code: str, year: int, field_value, sig: Di
     built = build_messages("verify", {
         "grounding": grounding, "source": source, "anchor_note": anchor_note, "unit_note": unit_note,
         "field": field, "field_label": sp.label or field, "field_spec_note": _field_prompt_notes(field, sp),
-        "field_value_json": json.dumps(field_value, ensure_ascii=False, indent=2),
+        "field_value_json": json.dumps(_strip_ratio(field_value, sp), ensure_ascii=False, indent=2),
     })
     return built["messages"], grounding
 

@@ -1,9 +1,14 @@
 id: rev_heal_300034_2025
 field: revenue
-note: 新增分隔行标记'按经营地区分类'→regions，将地区分项从segments桶中分离，使各桶分项和均等于营业收入锚
+note: 将'按经营地区分类'标记为regions桶，并补全名称列别名以正确识别分隔行和分项名称
 delta:
   revenue_breakdown:
     dimensions:
       按经营地区分类: regions
+    header_aliases:
+      name:
+      - 合同分类
+      - 业务类型
+      - 按经营地区分类
 meta:
   origin: '300034_2025'

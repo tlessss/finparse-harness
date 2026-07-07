@@ -17,8 +17,8 @@ from src.eval.sandbox_exec import version_parse_fn
 from src.agents.code_generator import repair
 
 CODE, YEAR = "000425", 2025
-MOTHER = "src/parsers/versions/rev_demo_partial_mother.py"
-OUT = "src/parsers/versions/rev_000425_forked.py"
+MOTHER = "archive/demo-parsers/rev_demo_partial_mother.py"
+OUT = "archive/demo-parsers/rev_000425_forked.py"
 
 
 def main():
