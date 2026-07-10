@@ -1,370 +1,308 @@
 def parse(tables, context=None):
     from src.parsers.infra.table_scanner import parse_money, is_total_row
     
-    if not tables:
-        return {"industries": [], "segments": [], "regions": [], "by_channel": []}
-    
     # 营收锚值
-    total_revenue = 61469630776.0  # 61,469,630,776
+    TOTAL_REVENUE_ANCHOR = 61469630776.0
+    TOLERANCE = 0.03  # ±3%
     
     # 维度映射
     DIMENSION_MAP = {
         "分行业": "industries", "按行业": "industries", "主营业务分行业": "industries",
         "分产品": "segments", "按产品": "segments", "主营业务分产品": "segments",
         "分地区": "regions", "按地区": "regions", "主营业务分地区": "regions",
-        "分销售模式": "by_channel", "按销售模式": "by_channel", "主营业务分销售模式": "by_channel",
-        "分销售渠道": "by_channel", "按销售渠道": "by_channel"
+        "分销售模式": "by_channel", "分销售渠道": "by_channel", "主营业务分销售模式": "by_channel"
     }
     
-    # 查找目标表格 - 包含"占营业收入比重"或相关关键词的表
+    # 查找包含营收结构的表格
     target_tables = []
-    for table_info in tables:
-        table = table_info["table"]
-        text_content = table_info.get("text", "")
-        
-        # 检查表头是否包含目标关键词
-        header_found = False
-        for row in table[:3]:  # 检查前3行
-            for cell in row:
-                if cell and ("占营业收入比重" in cell or "营业收入比重" in cell or "占比" in cell):
-                    header_found = True
-                    break
-            if header_found:
-                break
-        
-        # 检查文本内容
-        if header_found or "占营业收入比重" in text_content or "营业收入比重" in text_content or "占比" in text_content:
-            target_tables.append(table_info)
-    
-    # 如果没找到带占比的表，尝试找包含维度标记的表
-    if not target_tables:
-        for table_info in tables:
-            table = table_info["table"]
-            for row in table:
-                for cell in row:
-                    if cell and any(dim_key in cell for dim_key in DIMENSION_MAP.keys()):
-                        target_tables.append(table_info)
-                        break
-                if len(target_tables) > 0 and table_info in target_tables:
-                    break
-    
-    # 如果还是没找到，使用所有表
-    if not target_tables:
-        target_tables = tables
-    
-    # 初始化结果
-    result = {"industries": [], "segments": [], "regions": [], "by_channel": []}
-    
-    # 遍历所有目标表
-    for table_info in target_tables:
-        table = table_info["table"]
+    for table_data in tables:
+        table = table_data["table"]
         if not table:
             continue
             
-        # 识别当前维度
-        current_dimension = "segments"  # 默认维度
-        dimension_started = False
-        
-        # 找到维度标记行
-        for row_idx, row in enumerate(table):
+        # 检查表头是否包含关键词
+        header_text = ""
+        for row in table[:3]:  # 检查前3行
             for cell in row:
-                if cell and cell.strip() in DIMENSION_MAP:
-                    current_dimension = DIMENSION_MAP[cell.strip()]
-                    dimension_started = True
-                    break
-                elif cell and any(key in cell.strip() for key in DIMENSION_MAP):
-                    # 处理带前缀的情况，如"主营业务分行业"
-                    for key, dim in DIMENSION_MAP.items():
-                        if key in cell.strip():
-                            current_dimension = dim
-                            dimension_started = True
-                            break
-            if dimension_started:
-                break
-        
-        # 找到名称列和金额列
-        name_col = None
-        amount_col = None
-        
-        # 寻找包含金额的列（排除合计行）
-        for col_idx in range(max(len(row) for row in table) if table else 0):
-            potential_amounts = []
-            for row_idx, row in enumerate(table):
-                if col_idx < len(row) and row[col_idx]:
-                    cell_value = row[col_idx].strip()
-                    if parse_money(cell_value) is not None and not is_total_row(cell_value):
-                        potential_amounts.append(parse_money(cell_value))
-            
-            if len(potential_amounts) >= 2:  # 至少2个金额值
-                amount_col = col_idx
-                break
-        
-        # 寻找名称列（通常是金额列左边的文本列）
-        if amount_col is not None:
-            for col_idx in range(amount_col + 1):  # 在金额列及左侧寻找名称列
-                text_values = []
-                for row_idx, row in enumerate(table):
-                    if col_idx < len(row) and row[col_idx]:
-                        cell_value = row[col_idx].strip()
-                        if cell_value and not parse_money(cell_value) and not is_total_row(cell_value):
-                            # 检查是否为维度标记或无关行
-                            if cell_value not in DIMENSION_MAP and "合计" not in cell_value and "总计" not in cell_value:
-                                text_values.append(cell_value)
-                
-                if len(text_values) >= 2:
-                    name_col = col_idx
-                    break
-        
-        # 如果没找到合适的列，尝试其他策略
-        if name_col is None or amount_col is None:
-            # 尝试通过表头结构来确定列
-            for row_idx, row in enumerate(table):
-                # 检查是否是维度开始行
-                for cell_idx, cell in enumerate(row):
-                    if cell and cell.strip() in DIMENSION_MAP:
-                        # 从此行开始查找数据
-                        for next_row_idx in range(row_idx + 1, len(table)):
-                            next_row = table[next_row_idx]
-                            # 寻找包含金额的行
-                            for c_idx in range(len(next_row)):
-                                if c_idx < len(next_row) and next_row[c_idx]:
-                                    parsed_val = parse_money(next_row[c_idx])
-                                    if parsed_val is not None and not is_total_row(next_row[c_idx]):
-                                        if amount_col is None:
-                                            amount_col = c_idx
-                                        if name_col is None and c_idx > 0:
-                                            # 尝试找名称列
-                                            for nc_idx in range(min(c_idx, len(next_row))):
-                                                if nc_idx < len(next_row) and next_row[nc_idx]:
-                                                    if not parse_money(next_row[nc_idx]) and not is_total_row(next_row[nc_idx]):
-                                                        name_col = nc_idx
-                                                        break
-                                        break
-                            if amount_col is not None:
-                                break
-                        break
-        
-        # 提取数据
-        if name_col is not None and amount_col is not None:
-            for row_idx, row in enumerate(table):
-                # 检查是否是新的维度标记
-                for cell in row:
-                    if cell and cell.strip() in DIMENSION_MAP:
-                        current_dimension = DIMENSION_MAP[cell.strip()]
-                        break
-                
-                # 检查是否是数据行
-                if (name_col < len(row) and amount_col < len(row) and 
-                    row[name_col] and row[amount_col]):
-                    
-                    name = row[name_col].strip()
-                    amount_str = row[amount_col].strip()
-                    
-                    # 解析金额
-                    amount = parse_money(amount_str)
-                    
-                    if (amount is not None and 
-                        name and 
-                        not is_total_row(name) and 
-                        not name.startswith("其中") and
-                        name not in ["项 目", "项目", "营业收入合计", "主营业务收入", "其他业务收入"]):
-                        
-                        # 检查是否是维度标记行（纯文本，不含金额）
-                        is_dimension_marker = False
-                        for cell in row:
-                            if cell and cell.strip() in DIMENSION_MAP:
-                                is_dimension_marker = True
-                                break
-                        
-                        if not is_dimension_marker:
-                            # 添加到对应维度
-                            item_exists = False
-                            for existing_item in result[current_dimension]:
-                                if existing_item["name"] == name:
-                                    item_exists = True
-                                    break
-                            
-                            if not item_exists:
-                                result[current_dimension].append({
-                                    "name": name,
-                                    "revenue_yuan": amount,
-                                    "ratio_pct": None
-                                })
-
-    # 特殊处理：合并跨页表或多个表的数据
-    # 对于300014，候选表0包含了所有维度信息
-    for table_info in target_tables:
-        table = table_info["table"]
-        
-        # 检查是否是包含所有维度的大表
-        has_all_dimensions = any(
-            any(dim_key in (cell or "") for cell in row if cell)
-            for row in table
-            for dim_key in DIMENSION_MAP.keys()
-        )
-        
-        if has_all_dimensions:
-            # 重新解析这个表
-            current_section = "segments"  # 默认
-            for row_idx, row in enumerate(table):
-                # 检查是否是新的维度标记
-                for cell in row:
-                    if cell and any(dim_key in cell for dim_key in DIMENSION_MAP.keys()):
-                        for dim_key, dim_val in DIMENSION_MAP.items():
-                            if dim_key in cell:
-                                current_section = dim_val
-                                break
-                        break
-                
-                # 查找金额列和名称列
-                name_val = None
-                amount_val = None
-                
-                # 尝试找到名称和金额
-                for col_idx, cell in enumerate(row):
-                    if cell:
-                        cell_clean = cell.strip().replace("\n", "")
-                        if not parse_money(cell_clean) and not is_total_row(cell_clean) and \
-                           cell_clean and not any(k in cell_clean for k in DIMENSION_MAP.keys()) and \
-                           "占营业收入比重" not in cell_clean and "毛利率" not in cell_clean:
-                            name_val = cell_clean
-                        elif parse_money(cell_clean) and name_val:
-                            amount_val = parse_money(cell_clean)
-                            break
-                
-                # 如果上面没找到，尝试另一种方式
-                if not name_val or not amount_val:
-                    # 找到非汇总的文本和数字组合
-                    text_cells = []
-                    number_cells = []
-                    for col_idx, cell in enumerate(row):
-                        if cell:
-                            cell_clean = cell.strip().replace("\n", "")
-                            if not parse_money(cell_clean) and cell_clean and \
-                               not is_total_row(cell_clean) and \
-                               not any(k in cell_clean for k in DIMENSION_MAP.keys()) and \
-                               "占营业收入比重" not in cell_clean and "毛利率" not in cell_clean and \
-                               "营业收入比" not in cell_clean:
-                                text_cells.append((col_idx, cell_clean))
-                            elif parse_money(cell_clean):
-                                number_cells.append((col_idx, parse_money(cell_clean)))
-                    
-                    # 匹配最近的文本和数字
-                    if text_cells and number_cells:
-                        for t_col, t_val in text_cells:
-                            for n_col, n_val in number_cells:
-                                if not is_total_row(t_val) and "合计" not in t_val and "总计" not in t_val and \
-                                   "其中" not in t_val and "营业收入" not in t_val:
-                                    name_val = t_val
-                                    amount_val = n_val
-                                    break
-                            if name_val and amount_val:
-                                break
-                
-                if name_val and amount_val:
-                    # 检查是否是维度切换行
-                    is_dim_change = any(dim_key in name_val for dim_key in DIMENSION_MAP.keys())
-                    if is_dim_change:
-                        for dim_key, dim_val in DIMENSION_MAP.items():
-                            if dim_key in name_val:
-                                current_section = dim_val
-                                break
-                    elif not is_total_row(name_val) and "其中" not in name_val and \
-                         "营业收入合计" not in name_val and "主营业务收入" not in name_val:
-                        # 添加到结果
-                        exists = False
-                        for item in result[current_section]:
-                            if item["name"] == name_val:
-                                exists = True
-                                break
-                        if not exists:
-                            result[current_section].append({
-                                "name": name_val,
-                                "revenue_yuan": amount_val,
-                                "ratio_pct": None
-                            })
-    
-    # 最后检查并修正重复添加的问题
-    # 根据示例，应该有：
-    # industries: 电子元器件制造业
-    # segments: 消费电池、动力电池、储能电池、其他
-    # regions: 境内、境外
-    
-    # 重新构建结果，确保没有重复
-    final_result = {"industries": [], "segments": [], "regions": [], "by_channel": []}
-    
-    # 从候选表0的数据结构来看，我们需要提取特定的条目
-    for table_info in tables:
-        table = table_info["table"]
-        current_dim = "segments"
-        
-        for row_idx, row in enumerate(table):
-            # 检查维度变化
-            for cell in row:
-                if cell and cell.strip() in DIMENSION_MAP:
-                    current_dim = DIMENSION_MAP[cell.strip()]
-                    break
-            
-            # 查找具体项目
-            row_text = [str(cell).strip() if cell else "" for cell in row]
-            
-            # 检查是否包含具体的业务分类
-            for i, cell in enumerate(row):
                 if cell:
-                    cell_clean = cell.strip()
-                    # 检查是否是具体的产品/地区名称
-                    if ("消费电池" in cell_clean or "动力电池" in cell_clean or 
-                        "储能电池" in cell_clean or "其他" == cell_clean or
-                        "境内" in cell_clean or "境外" in cell_clean or
-                        "电子元器件制造业" in cell_clean):
-                        
-                        # 查找对应的金额（在该单元格右边的数字）
-                        for j in range(i+1, len(row)):
-                            if row[j]:
-                                amount = parse_money(str(row[j]).strip())
-                                if amount is not None:
-                                    # 确定维度
-                                    if "电子元器件制造业" in cell_clean:
-                                        dim_type = "industries"
-                                    elif "消费电池" in cell_clean or "动力电池" in cell_clean or \
-                                         "储能电池" in cell_clean or "其他" == cell_clean:
-                                        dim_type = "segments"
-                                    elif "境内" in cell_clean or "境外" in cell_clean:
-                                        dim_type = "regions"
-                                    else:
-                                        dim_type = current_dim
-                                    
-                                    # 检查是否已存在
-                                    exists = False
-                                    for item in final_result[dim_type]:
-                                        if item["name"] == cell_clean:
-                                            exists = True
-                                            break
-                                    
-                                    # 避免添加"其中"开头的行，防止父子重复计数
-                                    if not exists and not cell_clean.startswith("其中"):
-                                        final_result[dim_type].append({
-                                            "name": cell_clean,
-                                            "revenue_yuan": amount,
-                                            "ratio_pct": None
-                                        })
-                                    break
-
-    # 过滤掉"其中"开头的条目以避免父子重复计数
-    for dim_key in final_result:
-        filtered_items = []
-        for item in final_result[dim_key]:
-            if not item["name"].startswith("其中"):
-                filtered_items.append(item)
-        final_result[dim_key] = filtered_items
-
-    # 再次过滤，确保 segments 和 regions 不包含多余条目
-    # segments 应该只包含消费电池、动力电池、储能电池、其他
-    valid_segments = set(["消费电池", "动力电池", "储能电池", "其他"])
-    final_result["segments"] = [item for item in final_result["segments"] if item["name"] in valid_segments]
+                    header_text += cell
+        
+        if any(keyword in header_text for keyword in ["占营业收入比重", "营业收入比重", "占比", "营业收入", "分行业", "分产品", "分地区", "分销售模式"]):
+            target_tables.append(table_data)
     
-    # regions 应该只包含境内、境外
-    valid_regions = set(["境内", "境外"])
-    final_result["regions"] = [item for item in final_result["regions"] if item["name"] in valid_regions]
+    # 尝试合并跨页表格
+    merged_tables = merge_continuation_tables(target_tables)
+    
+    results = {
+        "industries": [],
+        "segments": [],
+        "regions": [],
+        "by_channel": []
+    }
+    
+    for table_data in merged_tables:
+        table = table_data["table"]
+        process_revenue_table(table, results, TOTAL_REVENUE_ANCHOR, TOLERANCE)
+    
+    # 验证各维度合计是否接近锚值
+    for dim_name, items in results.items():
+        total = sum(item["revenue_yuan"] for item in items)
+        expected_ratio = total / TOTAL_REVENUE_ANCHOR if TOTAL_REVENUE_ANCHOR != 0 else 0
+        
+        # 如果某个维度的总额远超锚值，可能是重复计算了
+        if expected_ratio > 1.05:
+            # 过滤掉可能的重复项（如父子关系）
+            filtered_items = remove_duplicate_entries(items)
+            results[dim_name] = filtered_items
+    
+    return results
 
-    return final_result
+
+def merge_continuation_tables(tables):
+    """合并跨页续表"""
+    # 按页码排序
+    sorted_tables = sorted(tables, key=lambda x: x["page"])
+    merged = []
+    
+    i = 0
+    while i < len(sorted_tables):
+        current = sorted_tables[i]
+        merged_table = current.copy()
+        
+        # 寻找续表
+        j = i + 1
+        while j < len(sorted_tables):
+            next_table = sorted_tables[j]
+            
+            # 检查是否为续表：页码连续，列数相近
+            if next_table["page"] == current["page"] or next_table["page"] == current["page"] + 1:
+                curr_rows = len(current["table"])
+                curr_cols = max(len(row) for row in current["table"]) if current["table"] else 0
+                next_cols = max(len(row) for row in next_table["table"]) if next_table["table"] else 0
+                
+                # 列数相近认为是续表
+                if abs(curr_cols - next_cols) <= 2:
+                    # 合并表格（去除可能的重复表头）
+                    first_next_row = next_table["table"][0] if next_table["table"] else []
+                    
+                    # 检查是否是重复的维度标识行
+                    is_duplicate_header = False
+                    for cell in first_next_row:
+                        if cell and any(dim_key in cell for dim_key in ["分行业", "分产品", "分地区", "分销售模式"]):
+                            is_duplicate_header = True
+                            break
+                    
+                    if is_duplicate_header:
+                        # 跳过重复的维度标识行
+                        merged_table["table"].extend(next_table["table"][1:])
+                    else:
+                        merged_table["table"].extend(next_table["table"])
+                    
+                    current = merged_table
+                    j += 1
+                else:
+                    break
+            else:
+                break
+        
+        merged.append(merged_table)
+        i = j if j > i + 1 else i + 1
+    
+    return merged
+
+
+def process_revenue_table(table, results, anchor, tolerance):
+    """处理单个营收表格"""
+    current_dimension = None
+    dimension_started = False
+    
+    # 找到金额列（通常是数值最大的列）
+    amount_col = find_amount_column(table)
+    
+    for row_idx, row in enumerate(table):
+        # 检查是否是维度分割行
+        dimension_found = False
+        for cell in row:
+            if cell and cell.strip() in ["分行业", "分产品", "分地区", "分销售模式"]:
+                # 检查是否是"主营业务分..."形式
+                full_text = "".join(row).strip()
+                for dim_key, dim_value in {
+                    "主营业务分行业": "industries",
+                    "主营业务分产品": "segments", 
+                    "主营业务分地区": "regions",
+                    "主营业务分销售模式": "by_channel",
+                    "分行业": "industries",
+                    "分产品": "segments",
+                    "分地区": "regions", 
+                    "分销售模式": "by_channel"
+                }.items():
+                    if dim_key in full_text:
+                        current_dimension = dim_value
+                        dimension_started = True
+                        dimension_found = True
+                        break
+            if dimension_found:
+                break
+        
+        if dimension_found:
+            continue
+        
+        # 跳过非当前维度的数据行
+        if not dimension_started:
+            continue
+        
+        if current_dimension is None:
+            continue
+            
+        # 解析数据行
+        name_cell = find_name_cell_in_row(row)
+        if not name_cell:
+            continue
+            
+        # 跳过汇总行
+        if is_total_row(name_cell):
+            continue
+            
+        # 跳过"其中："开头的子项（避免父子重复计算）
+        if name_cell.startswith("其中：") or name_cell.startswith("其中:"):
+            continue
+            
+        # 提取金额
+        amount = None
+        if amount_col is not None and amount_col < len(row):
+            amount_str = row[amount_col]
+            amount = parse_money(amount_str) if amount_str else None
+        else:
+            # 如果没有找到明确的金额列，则尝试在行中查找最大数值
+            amount = find_largest_amount_in_row(row)
+        
+        if amount is not None:
+            # 检查是否是口径行（如"营业收入合计"）
+            full_row_text = "".join([str(cell) if cell else "" for cell in row]).strip()
+            if any(preamble in full_row_text for preamble in ["营业收入合计", "主营业务收入", "其他业务收入"]):
+                continue
+                
+            item = {
+                "name": name_cell.strip(),
+                "revenue_yuan": amount
+            }
+            
+            # 避免重复添加
+            if item not in results[current_dimension]:
+                results[current_dimension].append(item)
+
+
+def find_amount_column(table):
+    """找到金额列索引"""
+    if not table:
+        return None
+    
+    num_cols = max(len(row) for row in table) if table else 0
+    if num_cols == 0:
+        return None
+    
+    # 统计每列的数值单元格数量
+    col_scores = []
+    for col_idx in range(num_cols):
+        score = 0
+        for row in table:
+            if col_idx < len(row) and row[col_idx]:
+                cell_value = row[col_idx]
+                parsed = parse_money(cell_value)
+                if parsed is not None and parsed > 1000:  # 金额通常较大
+                    score += 1
+        col_scores.append(score)
+    
+    # 返回数值最多且数值较大的列
+    best_col = None
+    best_score = 0
+    for i, score in enumerate(col_scores):
+        if score > best_score:
+            # 验证该列确实包含大额数字
+            sample_values = []
+            for row in table:
+                if i < len(row) and row[i]:
+                    val = parse_money(row[i])
+                    if val is not None:
+                        sample_values.append(val)
+            
+            if sample_values and max(sample_values) > 1000000:  # 至少有百万级别的金额
+                best_score = score
+                best_col = i
+    
+    return best_col
+
+
+def find_name_cell_in_row(row):
+    """在行中找到名称单元格"""
+    for cell in row:
+        if cell and cell.strip():
+            # 排除数值和百分比
+            stripped = cell.strip()
+            if not is_numeric_content(stripped) and '%' not in stripped:
+                return stripped
+    return None
+
+
+def is_numeric_content(text):
+    """检查文本是否为数值内容"""
+    text = text.replace(',', '').replace('，', '').strip()
+    if not text:
+        return False
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def find_largest_amount_in_row(row):
+    """在行中找到最大的金额值"""
+    amounts = []
+    for cell in row:
+        if cell:
+            parsed = parse_money(cell)
+            if parsed is not None:
+                amounts.append(parsed)
+    
+    return max(amounts) if amounts else None
+
+
+def remove_duplicate_entries(items):
+    """移除可能的重复条目（父子关系）"""
+    if len(items) <= 1:
+        return items
+    
+    # 按金额降序排列
+    sorted_items = sorted(items, key=lambda x: x["revenue_yuan"], reverse=True)
+    
+    # 检查是否存在父子关系（某项等于其他几项之和）
+    to_remove = set()
+    
+    for i, item in enumerate(sorted_items):
+        current_amount = item["revenue_yuan"]
+        # 检查后续较小的项是否加起来约等于当前项
+        temp_sum = 0
+        temp_indices = []
+        
+        for j in range(i + 1, len(sorted_items)):
+            if j not in to_remove:
+                temp_sum += sorted_items[j]["revenue_yuan"]
+                temp_indices.append(j)
+                
+                # 如果和接近当前项（允许小误差），则当前项可能是聚合项
+                if abs(temp_sum - current_amount) <= current_amount * 0.02:
+                    # 移除当前聚合项，保留子项
+                    to_remove.add(i)
+                    break
+                elif temp_sum > current_amount * 1.02:
+                    # 超过了，停止累加
+                    break
+    
+    # 构建结果列表
+    result = []
+    for i, item in enumerate(sorted_items):
+        if i not in to_remove:
+            result.append(item)
+    
+    return result

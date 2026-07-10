@@ -1,0 +1,10 @@
+id: rev_heal_300017_2025
+field: revenue
+note: 名称列表头'项目'未在name别名中，导致解析器未识别名称列，误将'主营业务'等行当作维度分隔行处理
+delta:
+  revenue_breakdown:
+    header_aliases:
+      name:
+      - 项目
+meta:
+  origin: '300017_2025'

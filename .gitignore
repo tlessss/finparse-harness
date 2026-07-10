@@ -60,8 +60,8 @@ pdfs/
 # llm-docs/ 下多为准则原文 PDF，默认不公开
 llm-docs/
 
-# ── 求职 / 个人（仅本地）──────────────────────────
-docs/career/
+# ── 文档 / 求职 / 个人（仅本地）────────────────────
+docs/
 简历/
 MORNING_BRIEF.md
 
@@ -86,3 +86,8 @@ camelot.log
 # ── 可选：LLM 生成的认证解析器（含版式专用逻辑，默认不公开）
 # 若开源需要 demo，可只提交 src/parsers/versions/rev_demo_*.py 并删掉下行
 # src/parsers/versions/
+
+# demo 运行时
+demos/**/checkpoints.sqlite*
+*.sqlite-shm
+*.sqlite-wal

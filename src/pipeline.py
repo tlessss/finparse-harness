@@ -238,6 +238,7 @@ def run_field(code: str, year: int, field: str, anchors: Dict = None,
             tables = prep.get("tables")
         if pdf is None:
             pdf = prep.get("pdf")
+    # 拿到跨表锚
     if anchors is None:                                       # 单跑(endpoint)时自动取锚
         try:
             from src.eval.anchors import get_anchors
@@ -253,42 +254,8 @@ def run_field(code: str, year: int, field: str, anchors: Dict = None,
                 "run_id": run_id,
                 **({"downloaded": True} if prep.get("downloaded") else {})}
 
-    # ① 生产路由优先：命中认证解析器且过硬规则 = 直接绿灯（真实链路的第一步）
-    try:
-        from src.parsers.revenue_router import route_field
-        rt = route_field(spec, code, year)
-    except Exception:
-        rt = {"status": "error"}
-    if rt.get("status") == "routed":
-        _emit_event_safe(run_id, code, year, field, "pipeline", "routed", outcome="ok",
-                         payload={"summary": "命中认证解析器",
-                                  "output": {"confidence": (rt.get("signal") or {}).get("confidence"),
-                                             "value_stats": _value_stats(rt.get("result"))}})
-        rec = {"field": field, "via": "routed", "outcome": "green",
-               "confidence": (rt.get("signal") or {}).get("confidence"), "value": rt.get("result"), "run_id": run_id}
-        if use_llm:
-            rec.update(_green_llm(code, year, field, rt.get("result"), rt.get("signal") or {}, spec))
-            _emit_llm_events(run_id, code, year, field, rec)
-            # 认证解析器是**冻结代码**(代码生成期固化),可能带旧 bug(如名称[:30]截断),不随 default.py 更新。
-            # 被复核否决(非选错表)→ 回落跑一遍冷启动(default.py 已是最新)+ 复核;冷启动能入库就用它。
-            if rec.get("outcome") == "verify_hold" and not rec.get("healed_select"):
-                cold = _cold_fallback(code, year, field, spec, tables, pdf, anchors)
-                if cold and cold.get("outcome") == "committed":
-                    out = {**rec, **cold, "via": "routed→冷启动回落", "run_id": run_id}
-                    _emit_llm_events(run_id, code, year, field, out)
-                    _emit_event_safe(run_id, code, year, field, "pipeline", "committed",
-                                     outcome="ok", payload={"summary": "复核通过并入库", "output": {"via": out.get("via")}})
-                    return out
-        if rec.get("outcome") == "committed":
-            _emit_event_safe(run_id, code, year, field, "pipeline", "committed",
-                             outcome="ok", payload={"summary": "复核通过并入库", "output": {"via": rec.get("via")}})
-        elif rec.get("handed_to_human"):
-            _emit_event_safe(run_id, code, year, field, "pipeline", "human",
-                             outcome="needs_human", payload={"summary": rec.get("summary"), "output": {"reason": rec.get("summary")}})
-        return rec
-
-    # ② 冷启动兜底：无认证解析器时引擎默认解析器 + 锚判。
-    #    base 优先 → 不过锚扫规则版本池（base-first 结构上不回归）。
+    # ① 冷启动(主路径:default.py + 版本池 + 跨页拼接)。路由**不再抢跑**——认证解析器是自愈的产物,
+    #    在下面自愈级联的第 0 步(按选中表骨架复用)被消费,而不是在流水线最前面预判(旧设计已删)。
     pv = _parse_versioned(code, year, field, tables, pdf, anchors, spec)
     value, sig = pv["value"], pv["sig"]
     _emit_event_safe(run_id, code, year, field, "pipeline", "cold_parse", outcome="ok" if value else "no_data",
@@ -297,28 +264,43 @@ def run_field(code: str, year: int, field: str, anchors: Dict = None,
                                          "stitched_pages": pv.get("stitched_pages"),
                                          "version_sweep_n": len(pv.get("sweep") or []),
                                          "value_stats": _value_stats(value)}})
+    conf = sig.get("confidence") if value else None
+    rec = {"field": field, "via": "cold", "confidence": conf, "anchored": sig.get("anchored"),
+           "value": value, "rule_version": pv.get("version"), "version_sweep": pv.get("sweep"), "run_id": run_id}
+    if value:
+        _emit_event_safe(run_id, code, year, field, "pipeline", "anchor_check", outcome=conf,
+                         payload={"summary": f"锚判={conf}",
+                                  "input": {"value_stats": _value_stats(value)},
+                                  "output": {"anchored": sig.get("anchored"), "confidence": conf}})
+        if conf == "high":                                      # 绿灯：锚确认 → 复核 → 入库
+            rec["outcome"] = "green"
+            if use_llm:
+                rec.update(_green_llm(code, year, field, value, sig, spec))
+                _emit_llm_events(run_id, code, year, field, rec)
+            if rec.get("outcome") == "committed":
+                _emit_event_safe(run_id, code, year, field, "pipeline", "committed",
+                                 outcome="ok", payload={"summary": "复核通过并入库", "output": {"via": rec.get("via")}})
+            elif rec.get("handed_to_human"):
+                _emit_event_safe(run_id, code, year, field, "pipeline", "human",
+                                 outcome="needs_human", payload={"summary": rec.get("summary"), "output": {"reason": rec.get("summary")}})
+            return rec
+
+    # ② 冷启动没绿灯(无结果 / 不过锚)→ 自愈级联
+    #    heal-step-0:按选中表骨架复用已认证解析器(codegen/人修好的成果)。命中且过双闸 → 秒入库,不重造。
+    #    这类版式(如 300014 IFRS 矩阵表)default.py 本就解不了,认证解析器是唯一能解的——正是自愈该消费它的地方。
+    if use_llm and spec.anchor_key:
+        reuse = _routed_reuse(code, year, field, spec, anchors)
+        if reuse and reuse.get("outcome") == "committed":
+            _emit_event_safe(run_id, code, year, field, "pipeline", "routed", outcome="ok",
+                             payload={"summary": "自愈复用认证解析器",
+                                      "output": {"parser": reuse.get("reused_parser")}})
+            _emit_llm_events(run_id, code, year, field, reuse)
+            _emit_event_safe(run_id, code, year, field, "pipeline", "committed",
+                             outcome="ok", payload={"summary": "复核通过并入库", "output": {"via": reuse.get("via")}})
+            return {**reuse, "run_id": run_id}
+
     if not value:
         return {"field": field, "outcome": "no_data", "via": "cold", "run_id": run_id}   # 解析器没解出东西 → needs_write
-    conf = sig.get("confidence")
-    rec = {"field": field, "via": "cold", "confidence": conf, "anchored": sig.get("anchored"),
-           "value": value, "rule_version": pv["version"], "version_sweep": pv["sweep"], "run_id": run_id}
-    _emit_event_safe(run_id, code, year, field, "pipeline", "anchor_check", outcome=conf,
-                     payload={"summary": f"锚判={conf}",
-                              "input": {"value_stats": _value_stats(value)},
-                              "output": {"anchored": sig.get("anchored"), "confidence": conf}})
-
-    if conf == "high":                                          # 绿灯：锚确认
-        rec["outcome"] = "green"
-        if use_llm:
-            rec.update(_green_llm(code, year, field, value, sig, spec))
-            _emit_llm_events(run_id, code, year, field, rec)
-        if rec.get("outcome") == "committed":
-            _emit_event_safe(run_id, code, year, field, "pipeline", "committed",
-                             outcome="ok", payload={"summary": "复核通过并入库", "output": {"via": rec.get("via")}})
-        elif rec.get("handed_to_human"):
-            _emit_event_safe(run_id, code, year, field, "pipeline", "human",
-                             outcome="needs_human", payload={"summary": rec.get("summary"), "output": {"reason": rec.get("summary")}})
-        return rec
     if not spec.anchor_key:                                     # 无锚字段：确定性判不了对错
         rec["outcome"] = "no_anchor"
         return rec
@@ -363,6 +345,11 @@ def _green_llm(code, year, field, value, sig, spec) -> Dict:
                "summary": v.get("summary"), "chat": chat}
         if verdict == "pass":
             return {"outcome": "committed", "committed": _auto_commit(code, year, field, value, sig), **llm}
+        # heal-step-0(最便宜的 healer):复核 hold → 先按选中表骨架复用已认证解析器(codegen/人修好的成果),
+        # 命中且过双闸 → 秒入库,不必再跑选表自愈/steward/L3。300014 这类"default.py 解出7行但复核否"正靠它。
+        reuse = _routed_reuse(code, year, field, spec, None)
+        if reuse and reuse.get("outcome") == "committed":
+            return {**llm, "reused_after_hold": True, **reuse}
         if any(s.get("issue") == "wrong_table" for s in suspects):     # 复核喊选错表 → 选表自愈
             rec, healed = _heal_and_verify(code, year, field, spec)
             if healed:
@@ -381,30 +368,64 @@ def _green_llm(code, year, field, value, sig, spec) -> Dict:
             enqueue(code, year, field, "needs_human", note="选表自愈未选到更好的表")
             return {"outcome": "verify_hold", "handed_to_human": True, **llm, **rec}
         issues = ", ".join(str(s.get("issue")) for s in suspects if s.get("issue"))[:120]
-        # 复核因"缺行/不完整"(非选错表)hold:归入抽表可修类就先试 L3 换参重抽,过双闸才收,否则再交人工。
+        # 管家A·二次裁决:金额锚已过、弱模型(deepseek)复核 hold(且非选错表)→ 强模型(qwen)重判。
+        # 假 hold(强模型也说没问题)→ 入库(仍是金额锚+强模型复核双过,没绕闸);真 hold → 带强模型病因继续修/交人工。
+        from src.agents.steward_agent import steward_adjudicate
+        adj = steward_adjudicate(code, year, field, value, sig, spec)
+        if adj.get("decision") == "commit":
+            return {"outcome": "committed", "committed": _auto_commit(code, year, field, value, sig),
+                    "steward": adj, **llm}
+        # 真 hold(强模型确认):抽表可修类先试 L3,再不行带强模型病因交人工。
         cat = _diagnose_category(code, year, field)
         if cat in _L3_CATS:
             eh_rec = _extract_heal_and_verify(code, year, field, _chosen_for(code, year, field), spec)
             if eh_rec and eh_rec.get("outcome") == "committed":
-                return {**llm, **eh_rec, "routed_cat": cat}
-        enqueue(code, year, field, "needs_human", note=f"verify hold: {issues or llm['summary'] or ''}"[:200])
-        return {"outcome": "verify_hold", "handed_to_human": True, **llm}
+                return {**llm, **eh_rec, "steward": adj, "routed_cat": cat}
+        note = (f"真hold(强模型确认): {adj.get('cause') or issues}" if adj.get("decision") == "real_hold"
+                else f"verify hold: {issues or llm['summary'] or ''}")
+        enqueue(code, year, field, "needs_human", note=note[:200])
+        return {"outcome": "verify_hold", "handed_to_human": True, "steward": adj, **llm}
     except Exception as e:
         return {"llm_error": str(e)[:100]}
 
 
-def _cold_fallback(code, year, field, spec, tables, pdf, anchors) -> Optional[Dict]:
-    """认证解析器(冻结代码)被复核否决时的回落:跑一遍冷启动(base→版本池→跨页拼接)+复核。
-    冷启动过锚(high)才走复核;复核 pass 才算数。让 default.py 的最新修复能救回冻结解析器带旧 bug 的报告。"""
+def _routed_reuse(code, year, field, spec, anchors) -> Optional[Dict]:
+    """自愈第 0 步:按**选中表骨架**查已认证解析器(codegen/人修好的成果)→ 命中就跑它,过**双闸**
+    (金额锚 high + 复核 pass,和其它 healer 同一把尺)→ 入库。这是最便宜的 healer:复用而非重造。
+    认证解析器是自愈的持久记忆(某版式以前被修好过一次),所以在自愈级联里消费,而不是在流水线最前面预判。
+    没命中 / 没过双闸 → None,交给下游 healer(选表自愈/L2/L3/codegen)。"""
+    if anchors is None:                                            # 金额锚 high 判定必需,缺则自取
+        try:
+            from src.eval.anchors import get_anchors
+            anchors = get_anchors(code, year) or {}
+        except Exception:
+            anchors = {}
     try:
-        pv = _parse_versioned(code, year, field, tables, pdf, anchors or {}, spec)
+        from src.parsers.revenue_router import route_field, field_plausibility
+        rt = route_field(spec, code, year)
     except Exception:
         return None
-    if not pv.get("value") or (pv.get("sig") or {}).get("confidence") != "high":
+    if rt.get("status") != "routed":
         return None
-    out = {"value": pv["value"], "rule_version": pv["version"], "version_sweep": pv["sweep"]}
-    out.update(_green_llm(code, year, field, pv["value"], pv["sig"], spec))
-    return out
+    value = rt.get("result")
+    if not value:
+        return None
+    sig = field_plausibility(spec, value, anchors or {})           # route 内部只判了 clean,这里补金额锚 high
+    if sig.get("confidence") != "high":
+        return None
+    try:
+        from src.agents.llm_judge import verify_field
+        from src.eval.triage_queue import _auto_commit
+        v = verify_field(field, code, year, value, sig=sig, spec=spec)
+    except Exception:
+        return None
+    if v.get("verdict") != "pass":
+        return None
+    return {"field": field, "via": "routed(自愈复用)", "outcome": "committed",
+            "confidence": "high", "value": value,
+            "committed": _auto_commit(code, year, field, value, sig),
+            "reused_parser": rt.get("parser"),
+            "llm_kind": "verify", "verdict": "pass", "summary": v.get("summary")}
 
 
 def _diagnose_category(code, year, field) -> str:
@@ -768,9 +789,23 @@ def _extract_heal_and_verify(code, year, field, chosen, spec) -> Optional[Dict]:
         return {"outcome": "committed", "healed_extract": True,
                 "committed": _auto_commit(code, year, field, eh["value"], {"confidence": "high"}),
                 "extract_profile_path": path, "profile": eh.get("profile"), **common}
+    # roadmap#1:L3 重抽过锚(eh fixed)但弱模型复核 hold → 管家用**强模型**对同一张重抽表二次裁决。
+    from src.agents.steward_agent import steward_adjudicate
+    adj = steward_adjudicate(code, year, field, eh["value"], eh.get("sig") or {"confidence": "high"}, spec,
+                             source_override=src, extra_note=_TRUST_NOTE)
+    common["steward"] = adj
+    if adj.get("decision") == "commit":            # 强模型判假 hold → 入库(L3 修对了、弱模型固执)
+        page = pick.get("page") or chosen.get("page")
+        path = consolidate_extract_profile(code, year, page, eh.get("profile") or "default",
+                                           eh.get("settings") or {}, note=f"extract_heal {code}_{year}")
+        from src.eval.extract_profiles import mark_report_profile_synced
+        mark_report_profile_synced(code, year, page)
+        return {"outcome": "committed", "healed_extract": True, "steward": adj,
+                "committed": _auto_commit(code, year, field, eh["value"], {"confidence": "high"}),
+                "extract_profile_path": path, "profile": eh.get("profile"), **common}
     enqueue(code, year, field, "needs_human",
-            note=f"L3重抽过锚但复核hold p{chosen.get('page')}"[:200])
-    return {"outcome": "verify_hold", "handed_to_human": True, **common}
+            note=f"L3重抽过锚但复核hold(管家强模型也确认) p{chosen.get('page')}"[:200])
+    return {"outcome": "verify_hold", "handed_to_human": True, "steward": adj, **common}
 
 
 def _codegen_and_verify(code, year, field, spec) -> Optional[Dict]:
@@ -789,21 +824,21 @@ def _codegen_and_verify(code, year, field, spec) -> Optional[Dict]:
         return {"llm_kind": "codegen", "outcome": "codegen_still_bad",
                 "codegen": {"rounds": r.get("rounds"), "escalate": r.get("escalate")}}
     committed = _auto_commit(code, year, field, r["value"], r.get("sig") or {"confidence": "high"})
-    try:                                        # 固化:登记认证解析器(表+标题向量 + 文档级指纹) + 路由缓存
+    cert = None
+    try:                                        # 固化:按**选中表骨架**登记认证解析器(table_doc = 路由主键;指纹已废弃)
         from src.eval.parser_catalog import certify
-        from src.eval.route_index import fingerprint_of, route_set
         from src.parsers.infra.table_recall import report_table_doc
-        fp = fingerprint_of(code, year)
         _sf = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd"}.get(field, "revenue")
         tdoc = report_table_doc(code, year, _sf)
-        certify(f"{code}-codegen", out_path, field,
-                fingerprints=[fp] if fp else None, table_doc=tdoc or None)
-        if fp:
-            route_set(field, fp, out_path)
+        # smoke 闸:认证前沙箱跑通这个文件——跑不起来(如作用域 bug)就拒登,免得坏解析器进库、以后 route 永远 needs_repair。
+        cert = certify(f"{code}-codegen", out_path, field, table_doc=tdoc or None, smoke=(code, year))
     except Exception:
         pass
+    certified_ok = bool(cert and cert.get("certified"))            # smoke 没跑通 → 没登记进认证库(报告已入库,不影响本次结果,但下次不会复用它)
     return {"outcome": "committed", "llm_kind": "codegen", "via": "codegen",
-            "committed": committed, "certified_parser": out_path,
+            "committed": committed,
+            "certified_parser": out_path if certified_ok else None,
+            "cert": cert,
             "value": r["value"], "confidence": "high",
             "codegen": {"rounds": r.get("rounds")}}
 
@@ -843,7 +878,7 @@ def field_chain(code: str, year: int, field: str) -> Dict:
     if not pdf or not tables:
         add("抽表", False, "无 PDF 或未扫表")
         return {**out, "outcome": "no_input", "reason": "无 PDF / 未扫表"}
-    add("抽表", True, f"{len(tables)} 张表")
+    add("抽表", True, {"n_tables": len(tables), "io": {"in": "PDF 原文", "out": f"{len(tables)} 张表"}})
 
     # 选表
     try:
@@ -855,26 +890,21 @@ def field_chain(code: str, year: int, field: str) -> Dict:
         add("选表", False, "召回/锚都没命中目标表")
         return {**out, "outcome": "no_data", "reason": "选表失败：没选中目标表"}
     add("选表", True, {"page": pick.get("page"), "via": pick.get("via"),
-                       "rows": len(pick["table"]), "caption": (pick.get("caption") or "")[:60]})
+                       "rows": len(pick["table"]), "caption": (pick.get("caption") or "")[:60],
+                       "io": {"in": f"{len(tables)} 张候选表",
+                              "out": f"p{pick.get('page')}《{(pick.get('caption') or '')[:24]}》· {len(pick['table'])}行"}})
 
-    # 认证路由? (routed = 认证解析器命中且过硬规则)
-    try:
-        from src.parsers.revenue_router import route_field
-        rt = route_field(spec, code, year)
-    except Exception:
-        rt = {"status": "error"}
-    routed = rt.get("status") == "routed"
-
-    # 解析（连溯源一起拿）
-    if routed:
-        value, prov = rt.get("result"), {}
-    else:
-        value, prov = _cold_parse_full(code, year, field, tables, pdf)
+    # 解析（主路径=冷启动:default.py + 版本池 + 跨页拼。认证解析器不再抢跑,降为自愈第0步,只在冷启动没过锚时复用)
+    value, prov = _cold_parse_full(code, year, field, tables, pdf)
     if not value:
-        add("解析", False, "解析器在选中表上没解出结构化数据")
+        add("解析", False, "冷启动在选中表上没解出结构化数据")
         return {**out, "outcome": "no_data", "reason": "解析为空（选中表结构/认列失败）"}
     dims_present = list(value.keys()) if isinstance(value, dict) else ["<list>"]
-    add("解析", True, {"via": "认证解析器" if routed else "冷启动", "dims": dims_present})
+    rows_per_dim = {k: len(v) for k, v in value.items()} if isinstance(value, dict) else {}
+    _out = "、".join(f"{k}:{n}行" for k, n in rows_per_dim.items() if n) or "全空(选中表解不出分项)"
+    add("解析", True, {"via": "冷启动", "dims": dims_present,
+                       "rows_per_dim": rows_per_dim,
+                       "io": {"in": f"选中表(第{pick.get('page')}页那张)", "out": _out}})
     out["value"] = value                                          # 解析出的结构化 JSON
 
     # 溯源：每个解析值出自哪一页 + 选中表原文（让"数字从哪来"可核）
@@ -902,15 +932,16 @@ def field_chain(code: str, year: int, field: str) -> Dict:
     dims = diag.get("dims") or []
     per_dim = [{"dim": d.get("dim"), "sum": d.get("sum"), "match": d.get("match")} for d in dims]
     missing = missing_dims(value) if field == "revenue_breakdown" else []
-    anchor_ok = routed or conf == "high"
+    anchor_ok = conf == "high"
+    _hit = sum(1 for p in per_dim if p.get("match"))
     add("锚判", anchor_ok, {"anchor": diag.get("anchor"), "confidence": conf,
                            "per_dim": per_dim, "missing_dims": missing,
-                           "dims_agree": diag.get("dims_agree")})
+                           "dims_agree": diag.get("dims_agree"),
+                           "io": {"in": "各维分项和 + 营收锚",
+                                  "out": f"{_hit}/{len(per_dim)} 维过锚 · 置信 {conf}"}})
 
     # 出口 + 失败原因
-    if routed:
-        outcome, reason = "green", "认证解析器命中且过硬规则 → 直接绿灯"
-    elif conf == "high":
+    if conf == "high":
         outcome, reason = "green", "冷启动解析过跨表锚 → 绿灯"
     elif not spec.anchor_key:
         outcome, reason = "no_anchor", "该字段无 DB 锚，确定性判不了对错（需复核 agent / 人工）"
@@ -924,7 +955,7 @@ def field_chain(code: str, year: int, field: str) -> Dict:
         else:
             reason = "维度互相矛盾、都不过锚 → 疑似选错表 / 认列错"
     add("出口", outcome == "green", f"{outcome}")
-    return {**out, "outcome": outcome, "reason": reason, "via": "routed" if routed else "cold"}
+    return {**out, "outcome": outcome, "reason": reason, "via": "cold"}
 
 
 def _classify_failure(o, reason, v, anchor, per_dim, best, ndim) -> str:
@@ -1133,19 +1164,37 @@ _ANCHORED_GREEN = ("green", "committed", "verify_hold")
 
 
 def run_full_pass(year: int = 2025, field: str = "revenue_breakdown",
-                  codes: List[str] = None, log=print) -> Dict:
-    """对 DB 里全部报告跑**完整 LLM 流水线**：绿灯→复核(+选表自愈)，非绿灯→先选表 agent 再诊断。写 DB + 进度。"""
+                  codes: List[str] = None, refresh: bool = False, resume: bool = False,
+                  log=print) -> Dict:
+    """对 DB 里全部报告跑**完整 LLM 流水线**：绿灯→复核(+选表自愈)，非绿灯→先选表 agent 再诊断。写 DB + 进度。
+    refresh=True：每份先 get_tables(refresh=True) 重扫 PDF，清缓存污染(extract_heal 旧 bug 残留)。
+    resume=True：接着上次的进度跑，跳过已 done 的(配合墙钟被杀后续跑)。"""
     import time
     from src.eval.test_store import list_latest_runs
     if codes is None:
         codes = sorted({r["stock_code"] for r in list_latest_runs(year, [field]) if r["field"] == field})
     total = len(codes)
+    done_codes = set()
     state = {"phase": "verify", "total": total, "i": 0, "current": None,
              "done": [], "started": time.time(), "updated": time.time()}
+    if resume:                                    # 接着上次进度跑,跳过已 done 的
+        prev = load_progress()
+        if prev and prev.get("total") == total:
+            state = prev
+            state["phase"] = "verify"
+            done_codes = {d.get("code") for d in prev.get("done", [])}
     _write_progress(state)
     for i, code in enumerate(codes, 1):
+        if code in done_codes:                    # 续跑跳过
+            continue
         state.update(i=i, current=code, updated=time.time())
         _write_progress(state)
+        if refresh:                               # 清缓存污染:重扫 PDF 拿干净表
+            try:
+                from src.eval.table_cache import get_tables
+                get_tables(code, year, refresh=True)
+            except Exception:
+                pass
         rec = run_field(code, year, field, use_llm=True)
         try:
             save_chain_run(code, year, field)                 # 先存确定性阶段链路(展示用) → 点详情秒回、不再现场重解
@@ -1215,7 +1264,10 @@ def save_verify_run(code: str, year: int, field: str, rec: Dict) -> None:
     verify = {k: rec.get(k) for k in ("verdict", "summary", "handed_to_human", "suspects",
                                       "heal", "healed_select", "reverify", "reverify_detail", "caliber_gap",
                                       "llm_kind", "decision", "root_cause", "next_action", "evidence", "heal_probe",
-                                      "value", "chat", "reverify_chat", "diag_chat", "routed_cat")
+                                      "value", "chat", "reverify_chat", "diag_chat", "routed_cat",
+                                      "rule_heal", "healed_rule", "extract_heal", "healed_extract",
+                                      "codegen", "certified_parser", "cert", "steward",
+                                      "reused_parser", "reused_after_hold", "via")   # 各自愈层(含 heal-step-0 复用) → 链上平级显示
               if rec.get(k) is not None}
     save_run(code, year, field, outcome=rec.get("outcome", prev.get("outcome")),
              via=prev.get("via"), reason=prev.get("reason"), chain=prev.get("chain"), verify=verify)

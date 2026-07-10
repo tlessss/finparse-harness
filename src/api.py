@@ -875,6 +875,35 @@ def pipeline_failures_api(year: int = 2025, field: str = "revenue_breakdown"):
     return failure_analysis(year, field)
 
 
+# ── 超级工作台(管家) ──
+@app.get("/steward/workbench/{code}")
+def steward_workbench_api(code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """某公司的分层诊断档案(确定性,秒回)+ 本轮结局 —— 前端画成流程图。"""
+    from src.console_steward import workbench
+    return workbench(code, year, field)
+
+
+@app.post("/steward/diagnose/{code}")
+def steward_diagnose_api(code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """管家单案深诊断(强模型分层归因 → 根因/为什么没自愈/处方 + 裁决)。结果会存档。"""
+    from src.console_steward import diagnose
+    return diagnose(code, year, field)
+
+
+@app.get("/steward/diagnosis/{code}")
+def steward_saved_diagnosis_api(code: str, year: int = 2025, field: str = "revenue_breakdown"):
+    """读某公司已存档的管家诊断(无 LLM,秒回)——开页先显示历史诊断,没存过返回 {}。"""
+    from src.console_steward import saved_diagnosis
+    return saved_diagnosis(code, year, field)
+
+
+@app.get("/steward/roadmap")
+def steward_roadmap_api():
+    """最近一次批量复盘的治理路线图(最大根因桶 + 自驱路线图)。"""
+    from src.console_steward import roadmap
+    return roadmap()
+
+
 @app.get("/pipeline/progress")
 def pipeline_progress_api():
     """实时批跑进度：phase / i / total / current(正在跑哪家) / done(已完成结局)。"""
@@ -892,9 +921,43 @@ def pipeline_chain_api(stock_code: str, year: int = 2025, field: str = "revenue_
 
 @app.get("/pipeline/llm")
 def pipeline_llm_api(stock_code: str, year: int = 2025, field: str = "revenue_breakdown"):
-    """按需跑 LLM：绿灯→复核 agent(选错表/跨页体检)，非绿灯→judge_diagnose 第一阶段。约 15~20s。结果写 DB。"""
+    """按需跑 LLM：绿灯→复核 agent(选错表/跨页体检)，非绿灯→judge_diagnose 第一阶段。约 15~20s。结果写 DB。
+
+    返回 run_field(..., use_llm=True) 的 dict，结构因 outcome 而异，公共字段如下：
+      field: str          — 字段名，如 revenue_breakdown
+      run_id: str         — 本次运行唯一 ID（process_events 可回放）
+      outcome: str        — 终态，见下表
+      via: str | None     — 路径：routed | cold | routed→冷启动回落 | domain | codegen 等
+      reason: str | None  — 早退原因（no_input / out_of_scope 等）
+
+    outcome 枚举（use_llm=True 时）：
+      committed     — 复核 pass 或自愈后入库（可能有 committed: {...} 入库详情）
+      verify_hold   — 复核 hold，交人工（handed_to_human=True, verdict/summary/suspects）
+      no_such_table — 源文无目标表
+      no_data       — 解析为空
+      no_input      — 无 PDF 或未抽表
+      no_anchor     — 无 DB 锚，确定性判不了（通常未进 LLM）
+      out_of_scope  — 金融域外
+      green         — 过锚但未跑完 LLM（极少，本接口恒 use_llm=True）
+      non_green     — 非绿灯且 LLM 未改 outcome（use_llm=False 时常见）
+
+    确定性解析（有 PDF/表时几乎总有）：
+      value: dict | None       — 结构化解析结果 {维度: [{name, amount, ...}, ...]}
+      confidence: str | None   — high / low / ...
+      anchored: bool | None
+      rule_version: str | None — base | 版本 id | base+跨页拼接
+      version_sweep: list | None
+
+    LLM / 自愈扩展（按路径出现，save_verify_run 会挑子集写 verify 列）：
+      llm_kind: verify | diagnose | rule_heal | extract_heal | codegen | no_such_table
+      verdict, summary, suspects, chat, reverify, reverify_detail, reverify_chat
+      healed_select, heal, caliber_gap, routed_cat
+      rule_heal, healed_rule, extract_heal, healed_extract, codegen, certified_parser
+      decision, root_cause, next_action, evidence, diag_chat, heal_probe, steward
+      llm_error: str           — LLM 异常时截断错误信息
+    """
     from src.pipeline import run_field, save_verify_run
-    rec = run_field(stock_code, year, field, use_llm=True)
+    rec = run_field(stock_code, year, field, use_llm=True)  # → Dict，见上方 docstring
     try:
         save_verify_run(stock_code, year, field, rec)
     except Exception:

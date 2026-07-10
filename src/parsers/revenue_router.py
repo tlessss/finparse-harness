@@ -16,14 +16,15 @@
   C 类(员工)：     各维度人数之和 = 总数(±2)
 """
 
-import os
 from typing import Dict, List, Optional
 
 from src.eval.table_cache import get_tables          # 取"引擎已抽好的表"(缓存)
 from src.eval.sandbox_exec import version_parse_fn   # 把一个解析器.py 文件变成可跑的函数
 from src.eval.field_spec import FieldSpec, REVENUE, as_dims
-from src.eval.parser_catalog import candidates_for, tag_fingerprint   # 指纹缩候选
-from src.eval.route_index import fingerprint_of, route_get, route_set, route_invalidate  # 版式→解析器缓存
+from src.eval.parser_catalog import candidates_for   # 无向量命中时退回"该字段全部候选"
+
+# 字段名 → select_table/table_recall 用的短名(revenue/cost/rnd)。路由按选中表骨架匹配时用。
+_SELECT_FIELD = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd"}
 
 
 def _plaus_b(spec: FieldSpec, value) -> Dict:
@@ -179,7 +180,6 @@ def route_field(spec: FieldSpec, code: str, year: int,
         return {"status": "needs_repair", "parser": None, "parser_key": None,
                 "result": None, "signal": None, "tried": [], "reason": "无缓存表", **base}
     use_index = catalog is None                       # 生产模式 vs 测试模式
-    fp = fingerprint if fingerprint is not None else (fingerprint_of(code, year) if use_index else None)
     # 跨表锚(DB营收/成本/研发)：给信号附置信度。测试模式(传 catalog)不查库。
     anchors = None
     if use_index:
@@ -189,35 +189,21 @@ def route_field(spec: FieldSpec, code: str, year: int,
         except Exception:
             anchors = None
 
-    # ── ① 缓存命中快路径：这个版式以前路由过谁，就直接跑那一个 ──
-    if use_index and fp:
-        cached = route_get(field, fp)                 # 查"版式指纹 → 解析器路径"
-        if cached and os.path.exists(cached):
-            try:
-                rb = version_parse_fn(cached)(code, year)    # 只跑这一个(冻结代码)
-                sig = field_plausibility(spec, rb, anchors)
-            except Exception:
-                rb, sig = None, {"clean": False}
-            if sig.get("clean"):                      # 硬规则仍达标 → 直接用，最快
-                return {"status": "routed", "parser": cached, "parser_key": "(缓存路由)",
-                        "result": rb, "signal": sig, "tried": [], "fingerprint": fp,
-                        "cache_hit": True, "candidates": 1, **base}
-            route_invalidate(field, fp)               # 不达标=版式漂移了→作废缓存，往下重选
-
-    # ── ② 缩候选 → 逐个跑 → 硬规则选优 ──
-    # 主匹配 = **表+标题向量**(表级,准):待解析报告目标表去数字骨架 vs 认证解析器登记的 table_doc 余弦。
-    # 无向量命中(BGE挂/无table_doc)→ 退回文档级指纹 candidates_for。向量只缩候选,过金额锚仍是硬闸。
+    # ── 选表**之后**按选中表骨架路由 → 缩候选 → 逐个跑 → 硬规则选优 ──
+    # 主匹配 = **表+标题向量**(表级,准):select_table 选出的**锚确认目标表**去数字骨架
+    #   vs 认证解析器登记的 table_doc 余弦。文档级指纹已废弃(整份哈希与"这张表能不能解对"无关)。
+    # 无向量命中(BGE挂/无table_doc)→ 退回"该字段全部候选"(过金额锚这道硬闸兜底)。
     cands = []
     if use_index:
         try:
             from src.eval.parser_catalog import candidates_by_vector
             from src.parsers.infra.table_recall import report_table_doc
-            _sf = {"revenue_breakdown": "revenue", "cost_breakdown": "cost", "rnd_info": "rnd"}.get(field, "revenue")
-            rdoc = report_table_doc(code, year, _sf)
+            _sf = _SELECT_FIELD.get(field, "revenue")
+            rdoc = report_table_doc(code, year, _sf)   # = 选中目标表的骨架(select_table 锚确认过)
             cands = candidates_by_vector(field, rdoc) if rdoc else []
         except Exception:
             cands = []
-    cands = cands or candidates_for(field, fp, catalog)
+    cands = cands or candidates_for(field, None, catalog)
     best, tried = None, []
     for c in cands:
         try:
@@ -231,19 +217,16 @@ def route_field(spec: FieldSpec, code: str, year: int,
         if best is None or key > best[0]:
             best = (key, c, rb, sig)
 
-    # 最优候选确实 clean → 命中，并记住"这个版式以后用它"(写缓存，下次走①)
+    # 最优候选确实 clean → 命中(靠向量骨架缩候选 + 金额锚硬闸，不再按指纹缓存记忆)
     if best and best[3]["clean"]:
         _, c, rb, sig = best
-        if use_index and fp:
-            route_set(field, fp, c["path"])           # 版式→解析器，记忆
-            tag_fingerprint(c["path"], fp)
         return {"status": "routed", "parser": c["path"], "parser_key": c["key"],
-                "result": rb, "signal": sig, "tried": tried, "fingerprint": fp,
+                "result": rb, "signal": sig, "tried": tried, "fingerprint": None,
                 "cache_hit": False, "candidates": len(cands), **base}
     # 谁都没解干净 → 让上层回退冷启动 / 触发"生成专用解析器"
     return {"status": "needs_repair", "parser": None, "parser_key": None,
             "result": None, "signal": (best[3] if best else None), "tried": tried,
-            "fingerprint": fp, "candidates": len(cands),
+            "fingerprint": None, "candidates": len(cands),
             "reason": "无认证解析器硬规则达标 → 冷启动/生成", **base}
 
 

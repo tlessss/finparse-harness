@@ -1,0 +1,33 @@
+id: steward_diagnose
+version: v1
+role: judge
+system: |-
+  你是自愈系统的"总诊断师"。给你一份失败报告的**分层证据档案**(确定性探针取的事实),你要像资深工程师一样
+  **自顶向下分层归因**,定位**真正的根因层**、说清**为什么没自愈**、给出**可执行处方**。
+  只依据档案里的事实,不猜。定位到"最深那层真正出错的地方"——别停在症状(如"全空"是症状,不是根因)。
+user: |-
+  报告 {{code}} 的诊断档案(各层事实,自顶向下)：
+  {{dossier}}
+
+  流水线分层 + 各字段怎么读：
+  1. 选表层 selection：`anchor_matches=true` = 某列合计≈营收锚 = **选对表了**（云南铜业就是选对了）。
+  2. 抽表层 extraction：`data_extracted=false` = 期望的维度数据行**根本没被 pdfplumber 抽进任何表**（抽残）→ 这是抽表层的锅，**不是选表/解析的锅**。
+  3. 解析层 parse：`all_empty` / 某维空 —— **若抽表层没抽出数据，这里必然空，不能归咎解析逻辑**。只有"数据抽出来了(extraction.data_extracted=true)但解析仍空/错"才是解析逻辑锅。
+  4. 路由/自愈层 routing + reextract_probe：`routes_to_L3/codegen` = 该失败类会不会触发对应 healer；`reextract_probe.recovers=true` = 换参/camelot 重抽**能**把数据救回来。
+
+  **归因套路**（照这个走）：
+  - 先找**最深的出错层**：选表对→看抽表；抽表全→看解析；……定位到第一个"真错"的层。
+  - 再判**为什么没自愈**：
+    · `reextract_probe.recovers=true` 但 `routing.routes_to_L3=false` → **路由漏**（能救却没派对药）。
+    · `recovers=true` 且 `routes_to_L3=true` → 现在**应能自愈**（若仍失败，多半卡在下游复核，需管家二次裁决）。
+    · `recovers=false`（换参也救不回）→ **抽表能力缺口**（需 camelot 之外更强/视觉抽行）。
+  - 处方要具体：修哪个 healer / 补哪条路由 / 建什么新能力。
+
+  只输出 JSON：
+  {"failure_layer":"选表|抽表|解析逻辑|锚|路由|复核","root_cause":"一句话真根因(不是症状)","evidence":"档案里支撑的关键字段","why_no_heal":"为什么(当时)没自愈","prescription":"该修什么,具体到healer/路由/能力","fixable_now":true/false,"note":"补充"}
+output_schema:
+  failure_layer: 选表|抽表|解析逻辑|锚|路由|复核
+  root_cause: 真根因(不是症状)
+  why_no_heal: 为什么没自愈
+  prescription: 具体处方
+  fixable_now: true/false

@@ -40,10 +40,35 @@ def _save_manifest(parsers: List[Dict]) -> None:
               ensure_ascii=False, indent=2)
 
 
+def _smoke_run(path: str, code: str, year: int) -> tuple:
+    """认证前的**沙箱跑通闸**:在子进程里加载+跑这个解析器文件(隔离,超时),要求
+      ① 不 import/scoping/run 报错 ② 输出是 dict ③ 至少有一个非空维度。
+    任一不满足 → (False, 原因)。专治"parse_money 作用域 bug"这类文件本身就跑不起来、却被登记进认证库。
+    用**子进程沙箱**(version_parse_fn_sandboxed):运行期错误(如 NameError)照样在 parse 时抛,能复现;又不拖垮主进程。"""
+    try:
+        from src.eval.sandbox_exec import version_parse_fn_sandboxed
+        rb = version_parse_fn_sandboxed(path)(code, year)
+    except Exception as e:
+        return False, f"沙箱跑挂: {str(e)[:120]}"
+    if not isinstance(rb, dict) or not rb:
+        return False, "解析器无输出"
+    if not any(isinstance(v, list) and v for v in rb.values()):
+        return False, "解析器输出无有效维度(全空)"
+    return True, ""
+
+
 def certify(key: str, path: str, field: str = _DEFAULT_FIELD,
-            fingerprints: Optional[List[str]] = None, table_doc: Optional[str] = None) -> None:
-    """登记一个认证解析器（去重）。记录字段 + 版式指纹（文档级,老快路径） + **table_doc**（目标表去数字+标题文字骨架,
-    表级向量匹配用——比文档级指纹准,是主匹配键）。"""
+            fingerprints: Optional[List[str]] = None, table_doc: Optional[str] = None,
+            smoke: Optional[tuple] = None) -> Dict:
+    """登记一个认证解析器（去重）。记录字段 + **table_doc**（目标表去数字+标题文字骨架,表级向量匹配主键）
+    + 版式指纹（老快路径,已弃用但字段保留）。
+    smoke=(code, year)：**认证前先沙箱跑通这份报告**——文件本身跑不起来/解不出东西 → 拒绝登记,
+    返回 {"certified": False, "reason": ...},不写库。防坏解析器(如 300014 的 parse_money 作用域 bug)混进认证库。
+    返回 {"certified": True/False, ...}(旧调用忽略返回值不受影响)。"""
+    if smoke:
+        ok, why = _smoke_run(path, smoke[0], smoke[1])
+        if not ok:
+            return {"certified": False, "reason": why, "key": key, "path": path}
     cur = load_certified()
     fps = [f for f in (fingerprints or []) if f]
     for c in cur:
@@ -53,12 +78,13 @@ def certify(key: str, path: str, field: str = _DEFAULT_FIELD,
             if table_doc:
                 c["table_doc"] = table_doc
             _save_manifest(cur)
-            return
+            return {"certified": True, "key": key, "path": path, "updated": True}
     entry = {"key": key, "path": path, "field": field, "fingerprints": sorted(set(fps))}
     if table_doc:
         entry["table_doc"] = table_doc
     cur.append(entry)
     _save_manifest(cur)
+    return {"certified": True, "key": key, "path": path, "updated": False}
 
 
 def candidates_by_vector(field: str, report_doc: str, catalog: Optional[List[Dict]] = None,

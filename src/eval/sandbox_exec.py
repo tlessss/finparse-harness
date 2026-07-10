@@ -53,3 +53,29 @@ def version_parse_fn(path: str):
             return None
         return parse(tables)                     # 跑解析器；异常向上抛，由调用方记为 error
     return fn
+
+
+def version_parse_fn_sandboxed(path: str, timeout: float = 30.0):
+    """同 version_parse_fn，但在**子进程**里跑(超时 + 隔离)——**跑 LLM 现写的不可信代码用这个**
+    (codegen 生成/迭代中的解析器)。死循环→超时杀掉、崩溃→非0退出,都只抛异常不拖垮主进程。
+    已认证/可信的解析器仍可用轻量的本进程 version_parse_fn(route 路径)。"""
+    import json
+    import os
+    import subprocess
+    import sys
+    from src.config import ROOT
+
+    def fn(code: str, year: int):
+        env = {**os.environ, "PYTHONPATH": str(ROOT)}
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "src.eval.sandbox_runner", path, str(code), str(year)],
+                capture_output=True, text=True, timeout=timeout, cwd=str(ROOT), env=env)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"sandbox 超时({timeout}s)：解析器疑似死循环")
+        out = proc.stdout or ""
+        i = out.rfind("__SBX__")
+        if i < 0:                                # 没结果 = 崩溃/报错 → 抛(带 stderr 末尾便于诊断)
+            raise RuntimeError(f"sandbox 无结果(exit={proc.returncode})：{(proc.stderr or out)[-300:]}")
+        return json.loads(out[i + len("__SBX__"):])
+    return fn

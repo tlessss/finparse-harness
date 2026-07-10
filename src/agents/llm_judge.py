@@ -187,7 +187,17 @@ def _ensure_prov(field, code, year, field_value, provenance, spec):
     from src.eval.provenance import attach_provenance
     from src.eval.field_spec import get_spec
     from src.eval.table_cache import get_tables
-    return attach_provenance(field_value, get_tables(code, year), spec or get_spec(field))
+    from src.parsers.infra.table_recall import select_table
+    sp = spec or get_spec(field)
+    tables = get_tables(code, year) or []
+    # 反查溯源**限定在 select_table 选中的那张表内**——冷启动解析器解的就是它;不限定的话同名/同值行会
+    # 被误配到别的表(如美的000333 的构成表 ↔ 旁边"10%以上"坑表),把复核源文污染成坑表、误判 wrong_table。
+    try:
+        sel = select_table(tables, code, year, _FIELD_SIG.get(field, "revenue"))
+        target = [sel] if (sel and sel.get("table")) else tables
+    except Exception:
+        target = tables
+    return attach_provenance(field_value, target, sp)
 
 
 def build_judge_messages(field: str, code: str, year: int, field_value,
@@ -319,17 +329,18 @@ def build_verify_messages(field: str, code: str, year: int, field_value, sig: Di
 
 def verify_field(field: str, code: str, year: int, field_value, sig: Dict = None,
                  provenance: Dict = None, spec=None, debug: bool = False, unit_label: str = None,
-                 source_override: str = None, extra_note: str = None) -> Dict:
+                 source_override: str = None, extra_note: str = None, model: str = None) -> Dict:
     """复核 agent：对**锚已过的绿灯**逐字段复核锚的盲区。pass=真可信→可入库；hold=有疑点→送人审。
     无源文可对照时判 unknown（既不放行也不拦，交回人工），不因缺证据误杀绿灯。
-    source_override: 选表自愈后拿"纠正后那张表"当源文；extra_note: 追加信任提示。"""
+    source_override: 选表自愈后拿"纠正后那张表"当源文；extra_note: 追加信任提示。
+    model: 覆盖复核模型（管家二次裁决时传强模型 qwen）。"""
     messages, grounding = build_verify_messages(field, code, year, field_value, sig, provenance, spec,
                                                 unit_label, source_override=source_override,
                                                 extra_note=extra_note)
     if messages is None:
         return {"verdict": "unknown", "suspects": [], "field": field,
                 "summary": "溯源+RAG均无源文，无法复核", "_system": _sys_text("verify") if debug else None}
-    raw = chat(messages, role="judge", temperature=0, model=resolve_model("verify"))   # 复核要可复现,temp=0
+    raw = chat(messages, role="judge", temperature=0, model=model or resolve_model("verify"))   # 复核要可复现,temp=0
     v = _extract_json(raw)
     # 复核 agent 的裁决字段是 verdict=pass|hold；_extract_json 失败会给 verdict=unknown，透传即可
     v.setdefault("suspects", v.get("issues", []))

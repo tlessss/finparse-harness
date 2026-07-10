@@ -32,6 +32,18 @@ def attach_provenance(value, tables: List[Dict], spec=REVENUE) -> Dict:
     """给一份字段结果反查溯源，返回 {字段路径: {page, bbox}}。字段通用(按 spec)。"""
     prov: Dict = {}
     amount_key, ratio_key = spec.amount_key, spec.ratio_key
+    # 先锁定"最像源表"的那一张:解析出的行名在它里命中最多的（= 解析器真正用的那张，含全部分项行名）。
+    # 只在这张表内反查——否则同名/同值的行会被误配到别的表（如美的000333 的"制造业/智能家居"同时出现在
+    # 真构成表 和 旁边的"10%以上"坑表里，按表序取首个就会把复核源文污染成坑表，导致本该 committed 的被误 hold）。
+    nameset = {_norm(r.get("name")) for _, rows in as_dims(value, spec).items()
+               if isinstance(rows, list) for r in rows if _norm(r.get("name"))}
+    best_t, best_hits = None, 0
+    for t in (tables or []):
+        hits = sum(1 for grow in (t.get("table") or [])
+                   if any(c and _norm(c) in nameset for c in grow))
+        if hits > best_hits:
+            best_hits, best_t = hits, t
+    search_tables = [best_t] if best_t else tables
     for dim, rows in as_dims(value, spec).items():
         if not isinstance(rows, list):
             continue
@@ -42,9 +54,9 @@ def attach_provenance(value, tables: List[Dict], spec=REVENUE) -> Dict:
             nn = _norm(name)
             if not nn:
                 continue
-            # 1) 按名称定位到源表那一行
+            # 1) 按名称定位到源表那一行（只在最像源表内找，防跨表污染）
             target = None
-            for page, grow, brow in _rows(tables):
+            for page, grow, brow in _rows(search_tables):
                 for c in range(len(grow)):
                     if grow[c] and _norm(grow[c]) == nn:
                         target = (page, grow, brow, c)

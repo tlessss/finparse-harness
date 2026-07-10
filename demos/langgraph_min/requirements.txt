@@ -1,0 +1,4 @@
+# LangGraph 自愈级联 demo 依赖(在 FinParseAI 根环境之上)
+langgraph>=0.6
+langgraph-checkpoint-sqlite>=2.0
+# 复用的真实 agent 依赖(verify/steward/解析)已在 FinParseAI 主 requirements 里

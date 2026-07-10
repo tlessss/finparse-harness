@@ -19,7 +19,7 @@ from typing import Dict, Callable
 from src.agents.llm_client import chat
 from src.agents.llm_routing import resolve_model
 from src.eval.table_cache import get_tables
-from src.eval.sandbox_exec import version_parse_fn
+from src.eval.sandbox_exec import version_parse_fn, version_parse_fn_sandboxed
 from src.eval.run_eval import eval_version, accept_candidate
 from src.eval.field_spec import REVENUE
 from src.parsers.infra.table_scanner import filter_by_signature
@@ -313,7 +313,7 @@ def generate_parser_autonomous(code: str, year: int, spec, out_path: str,
             f.write(src)
         out_rb, sig, vres = None, {"confidence": None}, None
         try:
-            out_rb = version_parse_fn(out_path)(code, year)
+            out_rb = version_parse_fn_sandboxed(out_path)(code, year)   # 子进程隔离跑不可信 LLM 代码
             sig = field_plausibility(spec, out_rb or {}, anchors)
         except Exception:
             pass

@@ -257,12 +257,14 @@ def scan_pdf(pdf_path: str, max_pages: int = 200) -> List[Dict]:
             reliable = bool(_toc) and bool(_context_from_toc(_toc, npages))
         except Exception:
             reliable = False
+        # 有书签且章节映射可信 → 只扫「可能有目标表」的页，跳过封面/目录/备查(other)
         if reliable:
             pages_to_scan = [pn for pn in range(1, npages + 1)
                              if page_context.get(pn) in (SECTION_MGMT, SECTION_GOV, SECTION_FUZHU)
-                             and pn <= _SCAN_HARD_CAP]
+                             and pn <= _SCAN_HARD_CAP]   # management=MD&A；gov=员工等；fuzhu=附注(营收构成在这)
         else:
-            pages_to_scan = list(range(16, min(npages, _SCAN_HARD_CAP) + 1))
+            # 无书签/章节不可信 → 不用 page_context 裁剪(易 mid-附注 误标 other 漏表)，从第16页扫到上限
+            pages_to_scan = list(range(16, min(npages, _SCAN_HARD_CAP) + 1))  # 16=跳过封面目录，宁可多扫不漏
 
         for pn in pages_to_scan:
             page = pdf.pages[pn - 1]
